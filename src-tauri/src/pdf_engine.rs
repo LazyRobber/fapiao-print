@@ -3327,18 +3327,22 @@ pub fn check_ocr_available() -> bool { false }
 /// 白边裁剪框：像素坐标，原点左上，[x, y, w, h]
 pub type TrimBox = [u32; 4];
 
-/// 判定「白」的亮度阈值（R、G、B 均 >= 此值视为白，严格小于才算内容）。
-/// 245 会把发票右侧「下载次数：1」这类 250 上下的浅灰细字当白边裁掉（实测复现）；
-/// 取 **253** —— 判定为 `min(R,G,B) < 253` 才算内容，即只有 253/254/255 视为白。
-/// 电子发票白底是纯白 255，这样能把「抗锯齿 + JPEG 淡出」的 252~254 边缘
-/// 也算作内容，避免印章/浅色小字（如「下载次数」）被裁掉一点点。
+/// 左右方向（列）判定阈值：宽松 —— 发票右侧常有「下载次数：1」这类 250 上下的
+/// 浅灰细字（实测复现：245 阈值会把它们裁掉一小半），取 **253** 保护浅色小字。
+/// 电子发票白底是纯白 255，放宽无副作用。
 pub const WHITE_THRESHOLD: u8 = 253;
+
+/// 上下方向（行）判定阈值：严格 —— 只认**彩色/深色**内容（min 通道 < 245）。
+/// 页面顶/底的浅灰渐变、扫描阴影是 R=G=B≈252 的纯灰，min 通道仍是 252，
+/// 不会被误保留（否则上下白边裁不干净）；而红色印章 G/B 通道远低于 R，
+/// min 通道很低，照样被保留。
+pub const EDGE_THRESHOLD: u8 = 245;
 
 /// 一行/列至少这么多非白像素才算「有内容」，抑制照片/JPEG 的孤立浅色噪点
 pub const MIN_CONTENT_PIXELS: u32 = 2;
 
-/// 检测白边范围，返回裁剪框（含 5px 内边距，已 clamp 到图像边界）。
-/// `threshold`: R、G、B 均 >= threshold 视为白色。
+/// 检测白边范围，返回裁剪框（含 12/28px 内边距，已 clamp 到图像边界）。
+/// `threshold`: 左右方向（列）判定用；上下方向（行）固定用 EDGE_THRESHOLD。
 /// 整图全白 / 无有效内容时返回 None。
 pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBox> {
     let rgba = img.to_rgba8();
@@ -3346,14 +3350,16 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     if w == 0 || h == 0 {
         return None;
     }
+    // 上下方向的判定阈值（严格，见 EDGE_THRESHOLD 注释）
+    let edge = EDGE_THRESHOLD.min(threshold);
 
-    // 行/列「非白」像素计数（一次遍历，避免四边重复扫描）
+    // 行「非白」像素计数（上下方向：只认彩色/深色，忽略浅灰渐变）
     let mut row_soft = vec![0u32; h as usize];
     for y in 0..h {
         let mut ds = 0u32;
         for x in 0..w {
             let p = rgba.get_pixel(x, y);
-            if p[0].min(p[1]).min(p[2]) < threshold {
+            if p[0].min(p[1]).min(p[2]) < edge {
                 ds += 1;
             }
         }
@@ -3368,6 +3374,7 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
         let mut ds = 0u32;
         for y in top..=bottom {
             let p = rgba.get_pixel(x, y);
+            // 左右方向用宽松阈值（保护「下载次数」这类浅色小字）
             if p[0].min(p[1]).min(p[2]) < threshold {
                 ds += 1;
             }

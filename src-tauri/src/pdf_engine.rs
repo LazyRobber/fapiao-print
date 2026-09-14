@@ -3329,20 +3329,11 @@ pub type TrimBox = [u32; 4];
 
 /// 判定「白」的亮度阈值（R、G、B 均 >= 此值视为白，严格小于才算内容）。
 /// 245 会把发票右侧「下载次数：1」这类 250 上下的浅灰细字当白边裁掉（实测复现），
-/// 提到 252；纯白底 JPEG 噪点实测 255，配合下面的过滤条件不受影响。
+/// 提到 252；纯白底 JPEG 噪点实测 255，配合 MIN_CONTENT_PIXELS 不受影响。
 pub const WHITE_THRESHOLD: u8 = 252;
 
-/// 「确定是内容」的亮度阈值：比它更暗的像素无需厚度检验，直接算内容
-/// （黑字、黑色表格线等）。200~251 之间的浅灰像素需通过厚度检验，
-/// 以区分「浅灰文字（厚）」和「页面边缘浅灰细线 / JPEG 振铃（薄）」。
-pub const HARD_THRESHOLD: u8 = 200;
-
-/// 一行/列至少这么多非白像素才算「有内容」，抑制孤立噪点
+/// 一行/列至少这么多非白像素才算「有内容」，抑制照片/JPEG 的孤立浅色噪点
 pub const MIN_CONTENT_PIXELS: u32 = 2;
-
-/// 浅灰内容还需在垂直/水平方向连续这么多像素才算真内容。
-/// 页面边缘的浅灰分隔线只有 1~2px 厚会被忽略；文字/印章至少十几 px，正常保留。
-pub const MIN_CONTENT_THICKNESS: u32 = 4;
 
 /// 检测白边范围，返回裁剪框（含 5px 内边距，已 clamp 到图像边界）。
 /// `threshold`: R、G、B 均 >= threshold 视为白色。
@@ -3353,97 +3344,36 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     if w == 0 || h == 0 {
         return None;
     }
-    let hard = HARD_THRESHOLD.min(threshold);
 
-    // 行统计：每行的「深色像素数」与「非白像素数」
-    let mut row_hard = vec![0u32; h as usize];
+    // 行/列「非白」像素计数（一次遍历，避免四边重复扫描）
     let mut row_soft = vec![0u32; h as usize];
     for y in 0..h {
-        let (mut dh, mut ds) = (0u32, 0u32);
+        let mut ds = 0u32;
         for x in 0..w {
             let p = rgba.get_pixel(x, y);
-            let mn = p[0].min(p[1]).min(p[2]);
-            if mn < threshold {
+            if p[0].min(p[1]).min(p[2]) < threshold {
                 ds += 1;
-                if mn < hard {
-                    dh += 1;
-                }
             }
         }
-        row_hard[y as usize] = dh;
         row_soft[y as usize] = ds;
     }
+    let top = (0..h as usize).find(|&y| row_soft[y] >= MIN_CONTENT_PIXELS)? as u32;
+    let bottom = (0..h as usize).rev().find(|&y| row_soft[y] >= MIN_CONTENT_PIXELS)? as u32;
 
-    // 索引 i 是否为「真内容」（forward=true 时内容自 i 向下延伸，false 时向上延伸）
-    let soft_ok = |c_h: &[u32], c_s: &[u32], k: usize| {
-        c_h[k] >= MIN_CONTENT_PIXELS || c_s[k] >= MIN_CONTENT_PIXELS
-    };
-    let qualifies = |c_h: &[u32], c_s: &[u32], i: usize, forward: bool| -> bool {
-        if c_h[i] >= MIN_CONTENT_PIXELS {
-            return true; // 深色内容，无需厚度检验
-        }
-        if c_s[i] < MIN_CONTENT_PIXELS {
-            return false;
-        }
-        let t = MIN_CONTENT_THICKNESS as usize;
-        let (s, e) = if forward { (i, i + t) } else { (i.saturating_sub(t - 1), i + 1) };
-        (s..e).all(|k| k < c_h.len() && soft_ok(c_h, c_s, k))
-    };
-
-    // Find top / bottom
-    let mut top = None;
-    for y in 0..h as usize {
-        if qualifies(&row_hard, &row_soft, y, true) {
-            top = Some(y as u32);
-            break;
-        }
-    }
-    let top = top?; // 整图全白：无内容可裁
-    let mut bottom = None;
-    for y in (0..h as usize).rev() {
-        if qualifies(&row_hard, &row_soft, y, false) {
-            bottom = Some(y as u32);
-            break;
-        }
-    }
-    let bottom = bottom?;
-
-    // 列统计：只扫 top..=bottom 范围（与旧实现一致）
-    let mut col_hard = vec![0u32; w as usize];
+    // 列统计限定在 top..=bottom（与旧实现一致）
     let mut col_soft = vec![0u32; w as usize];
     for x in 0..w {
-        let (mut dh, mut ds) = (0u32, 0u32);
+        let mut ds = 0u32;
         for y in top..=bottom {
             let p = rgba.get_pixel(x, y);
-            let mn = p[0].min(p[1]).min(p[2]);
-            if mn < threshold {
+            if p[0].min(p[1]).min(p[2]) < threshold {
                 ds += 1;
-                if mn < hard {
-                    dh += 1;
-                }
             }
         }
-        col_hard[x as usize] = dh;
         col_soft[x as usize] = ds;
     }
-
-    // Find left / right
-    let mut left = None;
-    for x in 0..w as usize {
-        if qualifies(&col_hard, &col_soft, x, true) {
-            left = Some(x as u32);
-            break;
-        }
-    }
-    let left = left?;
-    let mut right = None;
-    for x in (0..w as usize).rev() {
-        if qualifies(&col_hard, &col_soft, x, false) {
-            right = Some(x as u32);
-            break;
-        }
-    }
-    let right = right?;
+    let left = (0..w as usize).find(|&x| col_soft[x] >= MIN_CONTENT_PIXELS)? as u32;
+    let right = (0..w as usize).rev().find(|&x| col_soft[x] >= MIN_CONTENT_PIXELS)? as u32;
 
     if top >= bottom || left >= right {
         return None;
@@ -5432,14 +5362,17 @@ fn build_nup_content_stream(
 
         // Centered position in slot (bottom-left origin) based on visual dimensions.
         // 报销单模式：左上对齐（贴段内区域左上角）；常规模式：居中。
+        // 「裁剪白边」开启时垂直贴顶 —— 裁掉白边后内容居中会显出多余留白，
+        // 看起来像"白边没裁掉"；水平方向仍居中。
         let draw_w = vis_w * scale_x;
         let draw_h = vis_h * scale_y;
+        let top_align = settings.reimburse_mode || settings.trim_white.unwrap_or(false);
         let mut offset_x = slot.x_mm * MM_TO_PT;
-        let mut offset_y = if settings.reimburse_mode {
+        let mut offset_y = slot.y_mm * MM_TO_PT + if top_align {
             // bottom-up 坐标：顶部对齐 = slot 顶边 - 图像高度
-            slot.y_mm * MM_TO_PT + (slot_h_pt - draw_h)
+            slot_h_pt - draw_h
         } else {
-            slot.y_mm * MM_TO_PT + (slot_h_pt - draw_h) / 2.0
+            (slot_h_pt - draw_h) / 2.0
         };
         if !settings.reimburse_mode {
             offset_x += (slot_w_pt - draw_w) / 2.0;

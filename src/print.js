@@ -763,7 +763,10 @@ function fallbackPrint(files, s) {
         if (perScale !== 1) transforms += 'scale(' + perScale + ') ';
         if (rot) transforms += 'rotate(' + rot + 'deg) ';
         var transformStyle = transforms ? 'transform:' + transforms + ';' : '';
-        var slotAlignStyle = isReimb ? 'align-items:flex-start;justify-content:flex-start;' : '';
+        // 报销单模式：左上对齐；「裁剪白边」：垂直贴顶（水平仍居中）
+        var slotAlignStyle = isReimb
+          ? 'align-items:flex-start;justify-content:flex-start;'
+          : (s.trimWhite ? 'align-items:flex-start;' : '');
         html += '<div class="slot" style="left:' + x + 'mm;top:' + y + 'mm;width:' + slotW + 'mm;height:' + slotH + 'mm;' + slotAlignStyle + '"><img src="' + escHtml(src) + '" style="' + sizeStyle + transformStyle + '"></div>';
       }
     }

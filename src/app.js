@@ -136,6 +136,12 @@ function createFileObj(opts) {
     slotScale: opts.slotScale || 1,        // 1.0 = default (contain-fit size)
     slotOffsetX: opts.slotOffsetX || 0,    // X offset in mm (0 = centered)
     slotOffsetY: opts.slotOffsetY || 0,    // Y offset in mm (0 = centered)
+    // 裁剪白边缓存：trimmedBox 为内容在渲染位图中的像素范围（供 PDF 矢量裁切换算），
+    // trimmedW/trimmedH 为裁剪后尺寸，未裁剪时为 0（回退到 ow/oh）
+    trimmedUrl: null,
+    trimmedBox: null,
+    trimmedW: 0,
+    trimmedH: 0,
     _printed: false                        // True after successful print
   };
 
@@ -3043,6 +3049,14 @@ function canEnhanceFile(f) {
   return !!(f && f._filePath && !f._xmlInvoice && ENHANCE_IMAGE_TYPES.indexOf(f.type) >= 0);
 }
 
+/** 清空白边裁剪缓存（还原/增强后需按新图重算） */
+function clearTrimCache(f) {
+  f.trimmedUrl = null;
+  f.trimmedBox = null;
+  f.trimmedW = 0;
+  f.trimmedH = 0;
+}
+
 /** 单票调整面板「文本增强」开关：增强作用于原图全分辨率，打印清晰度不受影响 */
 function toggleTextEnhance() {
   var f = getSelectedFileObj();
@@ -3055,7 +3069,7 @@ function toggleTextEnhance() {
     f._origPreviewUrl = '';
     f._origImg = null;
     f._enhanced = false;
-    f.trimmedUrl = null; // 白边缓存基于原图，需按还原后的图重算
+    clearTrimCache(f); // 白边缓存基于原图，需按还原后的图重算
     updateAdjPanel();
     updatePreview();
     renderFileList();
@@ -3075,7 +3089,7 @@ function toggleTextEnhance() {
       // ow/oh 不变：增强不改动尺寸（EXIF 方向已在加载时与增强时一致烘焙）
       f._enhanced = true;
       f._enhancing = false;
-      f.trimmedUrl = null; // 白边缓存基于原图，需按增强后的图重算
+      clearTrimCache(f); // 白边缓存基于原图，需按增强后的图重算
       updateAdjPanel();
       updatePreview();
       renderFileList();
@@ -3137,8 +3151,9 @@ function setSlotAlignment(alignH, alignV) {
   // Use rotated visual dimensions — same as renderPage/PDF export (rotate-then-fit).
   // renderPage computes the wrapper from rotated visual dims; offsets move the
   // visual (post-rotation) box, so alignment gaps must use visual dims too.
-  var imgObjW = f.ow || 1;
-  var imgObjH = f.oh || 1;
+  var _alignDims = getObjDims(f, settings);
+  var imgObjW = _alignDims.w;
+  var imgObjH = _alignDims.h;
   var alignRot = getRotation(f, slot, settings);
   var alignRot90 = (alignRot === 90 || alignRot === 270);
   var fitW = alignRot90 ? imgObjH : imgObjW;
@@ -3451,7 +3466,13 @@ async function processTrim() {
     for (var i = 0; i < S.files.length; i++) {
       var f = S.files[i];
       if (f.previewUrl && !f.trimmedUrl) {
-        f.trimmedUrl = await invoke('trim_image', { dataUrl: f.previewUrl });
+        var trimmed = await invoke('trim_image', { dataUrl: f.previewUrl });
+        if (!trimmed || !trimmed.dataUrl) continue;
+        f.trimmedUrl = trimmed.dataUrl;
+        var tb = trimmed.trimBox;
+        f.trimmedBox = (tb && tb[2] > 0 && tb[3] > 0) ? { x: tb[0], y: tb[1], w: tb[2], h: tb[3] } : null;
+        f.trimmedW = f.trimmedBox ? f.trimmedBox.w : 0;
+        f.trimmedH = f.trimmedBox ? f.trimmedBox.h : 0;
       }
     }
     hideLoading();

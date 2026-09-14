@@ -3324,27 +3324,34 @@ pub fn check_ocr_available() -> bool { false }
 // White Edge Trimming
 // =====================================================
 
-/// Trim white edges from an image.
-/// `threshold`: pixels where R, G, B are all >= threshold are considered "white".
-/// Returns the cropped image with 5px padding.
-pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> image::DynamicImage {
+/// 白边裁剪框：像素坐标，原点左上，[x, y, w, h]
+pub type TrimBox = [u32; 4];
+
+/// 检测白边范围，返回裁剪框（含 5px 内边距，已 clamp 到图像边界）。
+/// `threshold`: R、G、B 均 >= threshold 视为白色。
+/// 整图全白 / 无有效内容时返回 None。
+pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBox> {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     if w == 0 || h == 0 {
-        return img.clone();
+        return None;
     }
 
-    // Find top
-    let mut top = 0u32;
+    // Find top —— 用 Option 区分「未找到任何内容」与「内容在第 0 行」
+    let mut top_opt: Option<u32> = None;
     'outer: for y in 0..h {
         for x in 0..w {
             let p = rgba.get_pixel(x, y);
             if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                top = y;
+                top_opt = Some(y);
                 break 'outer;
             }
         }
     }
+    let top = match top_opt {
+        Some(t) => t,
+        None => return None, // 整图全白：无内容可裁
+    };
 
     // Find bottom
     let mut bottom = h - 1;
@@ -3383,7 +3390,7 @@ pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> image::Dyna
     }
 
     if top >= bottom || left >= right {
-        return img.clone();
+        return None;
     }
 
     // Add 5px padding, clamp to image bounds
@@ -3393,10 +3400,23 @@ pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> image::Dyna
     let bottom = (bottom + p).min(h - 1);
     let right  = (right + p).min(w - 1);
 
-    let cw = right - left + 1;
-    let ch = bottom - top + 1;
-    let cropped = image::imageops::crop_imm(&rgba, left, top, cw, ch);
-    image::DynamicImage::from(cropped.to_image())
+    Some([left, top, right - left + 1, bottom - top + 1])
+}
+
+/// Trim white edges from an image.
+/// `threshold`: pixels where R, G, B are all >= threshold are considered "white".
+/// Returns the cropped image with 5px padding plus its crop box
+/// (None when nothing was cropped — all-white image).
+/// 裁剪框供 PDF 直通路径做矢量裁切换算（见 trim_white_box）。
+pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> (image::DynamicImage, Option<TrimBox>) {
+    match trim_white_box(img, threshold) {
+        Some([x, y, cw, ch]) => {
+            let rgba = img.to_rgba8();
+            let cropped = image::imageops::crop_imm(&rgba, x, y, cw, ch);
+            (image::DynamicImage::from(cropped.to_image()), Some([x, y, cw, ch]))
+        }
+        None => (img.clone(), None),
+    }
 }
 
 // =====================================================
@@ -3492,6 +3512,10 @@ pub struct FileSpec {
     /// The frontend stores this as fileObj._pdfPageIdx.
     #[serde(default)]
     pub pdf_page_idx: Option<u32>,
+    /// 白边裁剪框 [x, y, w, h]，像素坐标、原点左上，基于该文件渲染出的位图（ow × oh）。
+    /// 仅在「裁剪白边」开启且检测到白边时由前端传入；PDF 直通路径用它做矢量裁切。
+    #[serde(default)]
+    pub trim_box: Option<TrimBox>,
 }
 
 /// A slot on a page — which file (if any) goes here, and its rotation.
@@ -4112,8 +4136,9 @@ fn decode_images(
             }
 
             // Apply trim (global setting, not per-slot)
+            // 位图路径：裁剪直接烘焙进像素，不需要保留裁剪框
             if trim {
-                img = trim_white_edges(&img, 245);
+                img = trim_white_edges(&img, 245).0;
             }
 
             // Apply color mode (global setting, not per-slot)
@@ -4873,13 +4898,44 @@ fn merge_resource_dict(
     }
 }
 
+/// 把渲染位图的像素裁剪框换算成「旋转后显示坐标系」中的矩形（PDF 点，原点左下）。
+/// * `trim` — [x, y, w, h]，像素、原点左上，基于 `bmp_w × bmp_h` 的整页渲染位图
+/// * `eff_w` / `eff_h` — 页面旋转后的显示尺寸（PDF 点）
+///
+/// 返回 (x, y, w, h)；参数无效（空框 / 位图尺寸为 0）时返回 None。
+fn trim_box_to_crop_pt(
+    trim: TrimBox,
+    bmp_w: u32,
+    bmp_h: u32,
+    eff_w: f32,
+    eff_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let [x, y, cw_px, ch_px] = trim;
+    if bmp_w == 0 || bmp_h == 0 || cw_px == 0 || ch_px == 0 {
+        return None;
+    }
+    let sx = eff_w / bmp_w as f32;
+    let sy = eff_h / bmp_h as f32;
+    let cw = cw_px as f32 * sx;
+    let ch = ch_px as f32 * sy;
+    if cw <= 0.0 || ch <= 0.0 {
+        return None;
+    }
+    let cx = x as f32 * sx;
+    // 像素原点左上 → PDF 点原点左下
+    let cy = eff_h - (y + ch_px) as f32 * sy;
+    Some((cx, cy, cw, ch))
+}
+
 /// Extract a source PDF page as a Form XObject and register it in the output document.
-/// Returns (form_xobj_id, page_width_pt, page_height_pt).
+/// Returns (form_xobj_id, width_pt, height_pt) — 开启白边裁剪时返回裁剪后的尺寸。
 fn extract_page_as_form_xobject(
     source: &lopdf::Document,
     page_id: lopdf::ObjectId,
     mut output_doc: &mut lopdf::Document,
     id_map: &mut std::collections::HashMap<lopdf::ObjectId, lopdf::ObjectId>,
+    // 白边裁剪：(裁剪框像素, 位图宽px, 位图高px)。None = 嵌入整页。
+    trim: Option<(TrimBox, u32, u32)>,
 ) -> Result<(lopdf::ObjectId, f32, f32), String> {
     // 1. Get page content stream bytes (decompressed and concatenated)
     let content_bytes = source.get_page_content(page_id)
@@ -4901,6 +4957,21 @@ fn extract_page_as_form_xobject(
         (page_h_pt, page_w_pt)
     } else {
         (page_w_pt, page_h_pt)
+    };
+
+    // 3.5 白边裁剪：把渲染位图的像素裁剪框换算到「旋转后显示坐标系」（PDF 点，原点左下）。
+    // 位图是整页渲染的结果，尺寸 = effective 尺寸，故像素→点 用 effective/位图 比例。
+    let crop: Option<(f32, f32, f32, f32)> = trim.and_then(|(b, bmp_w, bmp_h)| {
+        let c = trim_box_to_crop_pt(b, bmp_w, bmp_h, effective_w, effective_h);
+        if let Some((cx, cy, cw, ch)) = c {
+            log::info!("extract_page_as_form_xobject: trim box={:?} bitmap={}x{} effective={:.1}x{:.1} → crop x={:.2} y={:.2} w={:.2} h={:.2}",
+                b, bmp_w, bmp_h, effective_w, effective_h, cx, cy, cw, ch);
+        }
+        c
+    });
+    let (bbox_w, bbox_h) = match crop {
+        Some((_, _, w, h)) => (w, h),
+        None => (effective_w, effective_h),
     };
 
     // 4. Build content stream with rotation + cropbox transforms prepended.
@@ -4938,6 +5009,15 @@ fn extract_page_as_form_xobject(
     if box_x1.abs() > 0.01 || box_y1.abs() > 0.01 {
         prefix.extend_from_slice(
             format!("1 0 0 1 {:.4} {:.4} cm\n", -box_x1, -box_y1).as_bytes()
+        );
+    }
+
+    // 白边裁剪平移：把裁剪区左下角移到原点。
+    // 必须写在最后——cm 是左乘（CTM' = M × CTM），先写的先作用于点，
+    // 裁剪框取自旋转后的渲染位图，所以它要作用在旋转/CropBox 之后的显示坐标系里。
+    if let Some((cx, cy, _, _)) = crop {
+        prefix.extend_from_slice(
+            format!("1 0 0 1 {:.4} {:.4} cm\n", -cx, -cy).as_bytes()
         );
     }
 
@@ -5186,7 +5266,8 @@ fn extract_page_as_form_xobject(
         }
     }
 
-    // 7. Build Form XObject stream — BBox uses EFFECTIVE (post-rotation) dimensions.
+    // 7. Build Form XObject stream — BBox uses EFFECTIVE (post-rotation) dimensions,
+    // 或裁剪后的尺寸（白边裁剪时内容已被平移到原点，BBox 从 0 起）。
     let mut dict = lopdf::Dictionary::new();
     dict.set("Type", lopdf::Object::Name(b"XObject".to_vec()));
     dict.set("Subtype", lopdf::Object::Name(b"Form".to_vec()));
@@ -5194,8 +5275,8 @@ fn extract_page_as_form_xobject(
     dict.set("BBox", lopdf::Object::Array(vec![
         lopdf::Object::Real(0.0),
         lopdf::Object::Real(0.0),
-        lopdf::Object::Real(effective_w),
-        lopdf::Object::Real(effective_h),
+        lopdf::Object::Real(bbox_w),
+        lopdf::Object::Real(bbox_h),
     ]));
     dict.set("Resources", remapped_resources);
 
@@ -5208,7 +5289,7 @@ fn extract_page_as_form_xobject(
     let stream = lopdf::Stream::new(dict, final_content).with_compression(true);
     let xobj_id = output_doc.add_object(lopdf::Object::Stream(stream));
 
-    Ok((xobj_id, effective_w, effective_h))
+    Ok((xobj_id, bbox_w, bbox_h))
 }
 
 /// Per-slot adjustment data for passthrough rendering.
@@ -5688,9 +5769,15 @@ fn generate_pdf_passthrough(
                     .copied()
                     .ok_or_else(|| format!("PDF页面{}不存在 (文件: {})", page_idx_in_pdf + 1, pdf_path))?;
 
-                // Extract as Form XObject (vector quality preserved)
+                // Extract as Form XObject (vector quality preserved).
+                // 白边裁剪开启时按前端传来的裁剪框做矢量裁切（整页 → 裁剪框）。
+                let trim = if request.settings.trim_white.unwrap_or(false) {
+                    file.trim_box.map(|b| (b, file.ow, file.oh))
+                } else {
+                    None
+                };
                 extract_page_as_form_xobject(
-                    source, source_page_id, &mut output_doc, id_map
+                    source, source_page_id, &mut output_doc, id_map, trim
                 )?
             } else {
                 // Image/OFD path → encode as FlateDecode (lossless) Image XObject

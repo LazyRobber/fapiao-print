@@ -4914,6 +4914,17 @@ fn trim_box_to_crop_pt(
     if bmp_w == 0 || bmp_h == 0 || cw_px == 0 || ch_px == 0 {
         return None;
     }
+    // 位图与页面显示尺寸应来自同一渲染，宽高比必须一致；
+    // 不一致说明位图并非该页的显示渲染（极端 /Rotate 等），换算不可信，退回整页避免错位。
+    let bmp_ratio = bmp_w as f32 / bmp_h as f32;
+    let eff_ratio = eff_w / eff_h;
+    if eff_ratio > 0.0 && ((bmp_ratio - eff_ratio) / eff_ratio).abs() > 0.02 {
+        log::warn!(
+            "trim_box_to_crop_pt: 位图宽高比 {:.4} 与页面显示宽高比 {:.4} 不一致，放弃矢量裁切",
+            bmp_ratio, eff_ratio
+        );
+        return None;
+    }
     let sx = eff_w / bmp_w as f32;
     let sy = eff_h / bmp_h as f32;
     let cw = cw_px as f32 * sx;

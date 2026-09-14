@@ -926,6 +926,7 @@ async function processFileDataList(fileDataList) {
   _loadingBatchActive = false;
   _insertSlotIdx = -1;
   _lastInsertedId = null;
+  maybeAutoTrim();  // 裁剪白边开关跨会话记忆：加载完成后自动补裁剪
 
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
     _ocrToastActive = false;
@@ -1077,6 +1078,7 @@ async function processFiles(files) {
   _loadingBatchActive = false;
   _insertSlotIdx = -1;
   _lastInsertedId = null;
+  maybeAutoTrim();  // 裁剪白边开关跨会话记忆：加载完成后自动补裁剪
 
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
     _ocrToastActive = false;
@@ -1233,6 +1235,7 @@ async function processFilesIncremental(paths) {
   _loadingBatchActive = false;
   _insertSlotIdx = -1;
   _lastInsertedId = null;
+  maybeAutoTrim();  // 裁剪白边开关跨会话记忆：加载完成后自动补裁剪
   document.getElementById('fileList').classList.remove('batch-loading');
 
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
@@ -3456,6 +3459,11 @@ function setMP(t, b, l, r) {
 function changeCopies(d) { var e = document.getElementById('copies'); e.value = Math.max(1, Math.min(99, parseInt(e.value) + d)); updatePreview(); }
 
 // Trim whitespace — now delegates to Rust backend (10-50x faster)
+/** 批量加载结束后：若「裁剪白边」已开启（开关跨会话记忆），自动补裁剪 */
+function maybeAutoTrim() {
+  if (S.feat.trimWhite) processTrim();
+}
+
 async function processTrim() {
   if (!isTauri || !invoke) {
     toast('白边裁剪需要桌面版');

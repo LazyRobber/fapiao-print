@@ -3328,9 +3328,10 @@ pub fn check_ocr_available() -> bool { false }
 pub type TrimBox = [u32; 4];
 
 /// 判定「白」的亮度阈值（R、G、B 均 >= 此值视为白，严格小于才算内容）。
-/// 245 会把发票右侧「下载次数：1」这类 250 上下的浅灰细字当白边裁掉（实测复现），
-/// 提到 252；纯白底 JPEG 噪点实测 255，配合 MIN_CONTENT_PIXELS 不受影响。
-pub const WHITE_THRESHOLD: u8 = 252;
+/// 245 会把发票右侧「下载次数：1」这类 250 上下的浅灰细字当白边裁掉（实测复现）；
+/// 取 253 —— 电子发票白底是纯白（255），把 253/254 这类"抗锯齿 + JPEG 淡出"的
+/// 内容边缘也算作内容，避免印章/文字边缘被裁掉一点点。
+pub const WHITE_THRESHOLD: u8 = 253;
 
 /// 一行/列至少这么多非白像素才算「有内容」，抑制照片/JPEG 的孤立浅色噪点
 pub const MIN_CONTENT_PIXELS: u32 = 2;
@@ -3379,8 +3380,9 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
         return None;
     }
 
-    // Add 5px padding, clamp to image bounds
-    let p: u32 = 5;
+    // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角（如印章圆弧顶）与坐标换算误差。
+    // 12px @300dpi ≈ 1mm，视觉上仍看不出白边，但能避免把内容切掉一点点。
+    let p: u32 = 12;
     let top    = top.saturating_sub(p);
     let left   = left.saturating_sub(p);
     let bottom = (bottom + p).min(h - 1);

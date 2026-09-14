@@ -549,7 +549,7 @@ fn trim_image(data_url: String) -> Result<TrimImageResult, String> {
 
     let img = pdf_engine::decode_base64_image(&data_url)
         .map_err(|e| format!("解码失败: {}", e))?;
-    let (trimmed, trim_box) = pdf_engine::trim_white_edges(&img, 245);
+    let (trimmed, trim_box) = pdf_engine::trim_white_edges(&img, pdf_engine::WHITE_THRESHOLD);
 
     // Encode back to PNG base64
     let mut buf = Cursor::new(Vec::new());

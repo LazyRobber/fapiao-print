@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>trim diag</title></head>
+<body><pre id="out">running...</pre>
+<script type="module">
+const lines = [];
+function P() {
+  lines.push(Array.from(arguments).map(a => (a && typeof a === 'object') ? JSON.stringify(a) : String(a)).join(' '));
+  document.getElementById('out').textContent = lines.join('\n');
+  fetch('/result', { method: 'POST', body: lines.join('\n') }).catch(function() {});
+}
+window.addEventListener('error', e => P('ONERROR: ' + e.message));
+P('BOOT');
+
+const DPI = 300;
+const W = 2480, H = 3507;           // A4 @300dpi
+const TXT_X = 2200, TXT_Y = 900;    // 右侧浅灰文字位置
+const TXT = '下载次数：1';
+
+function makeJpeg(textColor, withText, quality) {
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d', { alpha: false });
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#000000'; ctx.fillRect(400, 400, 1600, 1200);   // 票面主体
+  if (withText) {
+    ctx.fillStyle = textColor;
+    ctx.font = '33px sans-serif';
+    ctx.fillText(TXT, TXT_X, TXT_Y);
+  }
+  return cv.toDataURL('image/jpeg', quality);
+}
+
+function gray(v) { return 'rgb(' + v + ',' + v + ',' + v + ')'; }
+
+// 与 trimOneImage 同逻辑，但可指定阈值 + 最少非白像素数（抗 JPEG 噪点）
+function detect(dataUrl, thr, minCount) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = function () {
+      const cv = document.createElement('canvas');
+      cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
+      const cw = cv.width, chh = cv.height;
+      function nonWhiteRow(y) {
+        let n = 0;
+        for (let x = 0; x < cw; x++) { const i = (y * cw + x) * 4; if (d[i] < thr || d[i+1] < thr || d[i+2] < thr) n++; }
+        return n;
+      }
+      function nonWhiteCol(x) {
+        let n = 0;
+        for (let y = 0; y < chh; y++) { const i = (y * cw + x) * 4; if (d[i] < thr || d[i+1] < thr || d[i+2] < thr) n++; }
+        return n;
+      }
+      let top = 0; while (top < chh && nonWhiteRow(top) < minCount) top++;
+      let bottom = chh - 1; while (bottom > top && nonWhiteRow(bottom) < minCount) bottom--;
+      let left = 0; while (left < cw && nonWhiteCol(left) < minCount) left++;
+      let right = cw - 1; while (right > left && nonWhiteCol(right) < minCount) right--;
+      // 白底最小亮度（噪点下限）
+      let minLum = 255;
+      for (let y = 2000; y < 2200; y++) for (let x = 200; x < 400; x++) {
+        const i = (y * cw + x) * 4;
+        const v = Math.min(d[i], d[i+1], d[i+2]);
+        if (v < minLum) minLum = v;
+      }
+      resolve({ width: cw, height: chh, left, top, right, bottom, minLum });
+    };
+    img.src = dataUrl;
+  });
+}
+
+try {
+  // 1) 纯白底 JPEG：噪点下限（决定阈值能提到多高）
+  const blank = makeJpeg('#ffffff', false, 0.82);
+  const rb = await detect(blank, 245, 1);
+  P('[白底噪点] JPEG 0.82 白区最小亮度 = ' + rb.minLum + '（阈值必须高于它才能不误判）');
+
+  // 2) 浅灰文字：不同灰度下，阈值 245 能否保住右侧文字
+  P('');
+  P('[灰度扫描] 文字位置 x=' + TXT_X + '，检测到 right 应 >= 文字左边界才算保住');
+  P('灰度 | right@thr245 count1 | right@thr250 | right@thr250 count2 | right@thr252 count2');
+  for (const v of [200, 230, 240, 245, 246, 248, 250, 252, 254]) {
+    const url = makeJpeg(gray(v), true, 0.82);
+    const a = await detect(url, 245, 1);
+    const b = await detect(url, 250, 1);
+    const c = await detect(url, 250, 2);
+    const e = await detect(url, 252, 2);
+    const mark = r => (r.right >= TXT_X - 5 ? 'OK(' + r.right + ')' : 'CUT(' + r.right + ')');
+    P(v + ' | ' + mark(a) + ' | ' + mark(b) + ' | ' + mark(c) + ' | ' + mark(e));
+  }
+
+  // 3) 现有实现（阈值 245、count 1）对浅灰字的处理
+  P('');
+  for (const v of [246, 248]) {
+    const url = makeJpeg(gray(v), true, 0.82);
+    const r = await detect(url, 245, 1);
+    P('[现有实现 245/1] 灰字' + v + ' → right=' + r.right + '（文字左边界 ' + TXT_X + '）'
+      + (r.right >= TXT_X - 5 ? ' → 保住' : ' → 被裁掉'));
+  }
+
+  P('DONE');
+} catch (e) {
+  P('ERROR ' + (e && (e.stack || e.message || String(e))));
+}
+</script>
+</body></html>

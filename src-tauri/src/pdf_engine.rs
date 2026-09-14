@@ -3327,6 +3327,15 @@ pub fn check_ocr_available() -> bool { false }
 /// 白边裁剪框：像素坐标，原点左上，[x, y, w, h]
 pub type TrimBox = [u32; 4];
 
+/// 判定「白」的亮度阈值（R、G、B 均 >= 此值视为白，严格小于才算内容）。
+/// 245 会把发票右侧「下载次数：1」这类 250 上下的浅灰细字当白边裁掉（实测复现），
+/// 提到 252；纯白底 JPEG 噪点实测 255，配合 MIN_CONTENT_PIXELS 不受影响。
+pub const WHITE_THRESHOLD: u8 = 252;
+
+/// 一行/列至少这么多非白像素才算「有内容」。
+/// 用于抑制孤立噪点（照片/JPEG 压缩产生的零星浅色像素），比单纯放宽阈值更稳。
+pub const MIN_CONTENT_PIXELS: u32 = 2;
+
 /// 检测白边范围，返回裁剪框（含 5px 内边距，已 clamp 到图像边界）。
 /// `threshold`: R、G、B 均 >= threshold 视为白色。
 /// 整图全白 / 无有效内容时返回 None。
@@ -3340,11 +3349,15 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     // Find top —— 用 Option 区分「未找到任何内容」与「内容在第 0 行」
     let mut top_opt: Option<u32> = None;
     'outer: for y in 0..h {
+        let mut hit = 0u32;
         for x in 0..w {
             let p = rgba.get_pixel(x, y);
             if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                top_opt = Some(y);
-                break 'outer;
+                hit += 1;
+                if hit >= MIN_CONTENT_PIXELS {
+                    top_opt = Some(y);
+                    break 'outer;
+                }
             }
         }
     }
@@ -3356,11 +3369,15 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     // Find bottom
     let mut bottom = h - 1;
     'outer2: for y in (0..h).rev() {
+        let mut hit = 0u32;
         for x in 0..w {
             let p = rgba.get_pixel(x, y);
             if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                bottom = y;
-                break 'outer2;
+                hit += 1;
+                if hit >= MIN_CONTENT_PIXELS {
+                    bottom = y;
+                    break 'outer2;
+                }
             }
         }
     }
@@ -3368,11 +3385,15 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     // Find left
     let mut left = 0u32;
     'outer3: for x in 0..w {
+        let mut hit = 0u32;
         for y in top..=bottom {
             let p = rgba.get_pixel(x, y);
             if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                left = x;
-                break 'outer3;
+                hit += 1;
+                if hit >= MIN_CONTENT_PIXELS {
+                    left = x;
+                    break 'outer3;
+                }
             }
         }
     }
@@ -3380,11 +3401,15 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     // Find right
     let mut right = w - 1;
     'outer4: for x in (0..w).rev() {
+        let mut hit = 0u32;
         for y in top..=bottom {
             let p = rgba.get_pixel(x, y);
             if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                right = x;
-                break 'outer4;
+                hit += 1;
+                if hit >= MIN_CONTENT_PIXELS {
+                    right = x;
+                    break 'outer4;
+                }
             }
         }
     }
@@ -4138,7 +4163,7 @@ fn decode_images(
             // Apply trim (global setting, not per-slot)
             // 位图路径：裁剪直接烘焙进像素，不需要保留裁剪框
             if trim {
-                img = trim_white_edges(&img, 245).0;
+                img = trim_white_edges(&img, WHITE_THRESHOLD).0;
             }
 
             // Apply color mode (global setting, not per-slot)

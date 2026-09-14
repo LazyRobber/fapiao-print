@@ -3329,8 +3329,9 @@ pub type TrimBox = [u32; 4];
 
 /// 判定「白」的亮度阈值（R、G、B 均 >= 此值视为白，严格小于才算内容）。
 /// 245 会把发票右侧「下载次数：1」这类 250 上下的浅灰细字当白边裁掉（实测复现）；
-/// 取 253 —— 电子发票白底是纯白（255），把 253/254 这类"抗锯齿 + JPEG 淡出"的
-/// 内容边缘也算作内容，避免印章/文字边缘被裁掉一点点。
+/// 取 **253** —— 判定为 `min(R,G,B) < 253` 才算内容，即只有 253/254/255 视为白。
+/// 电子发票白底是纯白 255，这样能把「抗锯齿 + JPEG 淡出」的 252~254 边缘
+/// 也算作内容，避免印章/浅色小字（如「下载次数」）被裁掉一点点。
 pub const WHITE_THRESHOLD: u8 = 253;
 
 /// 一行/列至少这么多非白像素才算「有内容」，抑制照片/JPEG 的孤立浅色噪点
@@ -3380,13 +3381,15 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
         return None;
     }
 
-    // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角（如印章圆弧顶）与坐标换算误差。
-    // 12px @300dpi ≈ 1mm，视觉上仍看不出白边，但能避免把内容切掉一点点。
-    let p: u32 = 12;
-    let top    = top.saturating_sub(p);
-    let left   = left.saturating_sub(p);
-    let bottom = (bottom + p).min(h - 1);
-    let right  = (right + p).min(w - 1);
+    // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角与坐标换算误差。
+    // 12px @300dpi ≈ 1mm。右侧单独加大到 28px（≈2.4mm）：发票右侧常有
+    // 「下载次数」「密码区」这类浅色小字，检测容易漏掉最右几个字
+    // （实测「下载次数」被裁掉一小半），多留一点更安全。
+    let (p_l, p_t, p_r, p_b) = (12u32, 12u32, 28u32, 12u32);
+    let top    = top.saturating_sub(p_t);
+    let left   = left.saturating_sub(p_l);
+    let bottom = (bottom + p_b).min(h - 1);
+    let right  = (right + p_r).min(w - 1);
 
     Some([left, top, right - left + 1, bottom - top + 1])
 }
@@ -5020,6 +5023,10 @@ fn extract_page_as_form_xobject(
         );
     }
 
+    // annotation 绘制需要复用同一套变换（/Rotate + CropBox + 裁剪平移）：
+    // prefix 的前两个字节是 "q\n"，其余即为纯变换指令
+    let prefix_transforms: Vec<u8> = prefix[2..].to_vec();
+
     // Close the graphics state after content
     let mut suffix = Vec::new();
     suffix.extend_from_slice(b"\nQ\n");
@@ -5219,11 +5226,16 @@ fn extract_page_as_form_xobject(
                 let annot_name = format!("__Annot{}", annot_idx);
                 annot_xobjects.push((annot_name.clone().into_bytes(), ap_xobj_id));
 
-                // Drawing command: q <composed_matrix> /AnnotN Do Q
-                annot_draw_cmds.extend_from_slice(
-                    format!("q {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm /{} Do Q\n",
-                        cm_a, cm_b, cm_c, cm_d, cm_e, cm_f, annot_name).as_bytes()
-                );
+                // Drawing command: q <annot matrix> <prefix transforms> /AnnotN Do Q
+                // cm 是左乘累积（后写者在左 → 后作用于点）：先写 annot 的映射
+                // （AP 坐标 → 页面坐标），再写 prefix 变换，最终 CTM = prefix × annot
+                // —— AP 坐标先落到页面坐标，再经 /Rotate、CropBox 平移与白边裁剪
+                // 平移，和页面内容保持对齐。
+                let mut cmds = format!("q {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm ",
+                    cm_a, cm_b, cm_c, cm_d, cm_e, cm_f).into_bytes();
+                cmds.extend_from_slice(&prefix_transforms);
+                cmds.extend_from_slice(format!("/{} Do Q\n", annot_name).as_bytes());
+                annot_draw_cmds.extend_from_slice(&cmds);
 
                 log::info!("extract_page_as_form_xobject: annotation[{}] rect=[{:.1},{:.1},{:.1},{:.1}] bbox=[{:.1},{:.1},{:.1},{:.1}]",
                     annot_idx, rx1, ry1, rx2, ry2, bx1, by1, bx2, by2);
@@ -5241,6 +5253,8 @@ fn extract_page_as_form_xobject(
     // Annotation Rect coordinates are in the BBox coordinate system, so they
     // must be drawn AFTER the graphics state is restored — otherwise the CTM
     // scale would push the annotations far outside the BBox bounds.
+    // annotation 自带 prefix 变换 → 必须画在 Q 之后（CTM 已复位为 I），
+    // 否则 prefix 变换会被重复施加
     final_content.extend_from_slice(&suffix);
     final_content.extend_from_slice(&annot_draw_cmds);
 
@@ -6573,3 +6587,4 @@ fn build_border_ops_lopdf(
 
     Some(lopdf::content::Content { operations: ops })
 }
+

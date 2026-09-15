@@ -590,7 +590,7 @@ async function openFileDialog() {
         options: {
           multiple: true,
           title: '选择发票文件',
-          filters: [{ name: '发票文件', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif', 'ofd', 'xml'] }]
+          filters: [{ name: '发票文件', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'bmp', 'ofd', 'xml'] }]
         }
       });
       if (!result) return [];
@@ -1844,7 +1844,7 @@ function loadFileFast(file) {
       toast('PDF 格式请使用桌面版打开');
       resolve(null);
     }
-    else if (['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'].indexOf(ext) >= 0) {
+    else if (['jpg', 'jpeg', 'png', 'bmp'].indexOf(ext) >= 0) {
       var reader = new FileReader();
       reader.onload = async function(e) {
         var img = new Image(); img.src = e.target.result;
@@ -3124,7 +3124,7 @@ function applySlotAdjToAll() {
 // =====================================================
 // Text Enhancement — 浅色/模糊图片发票增强（Rust 全分辨率处理）
 // =====================================================
-var ENHANCE_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'];
+var ENHANCE_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'bmp'];
 
 /** 仅图片文件（有磁盘路径，走 Rust 原图处理）可增强；PDF/OFD/XML 不支持 */
 function canEnhanceFile(f) {

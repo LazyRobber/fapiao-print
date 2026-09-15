@@ -1877,7 +1877,7 @@ function loadFileFast(file) {
 // =====================================================
 // File list management
 // =====================================================
-var TYPE_FILTER_LABELS = { special: '专票', plain: '普票', ticket: '车票', toll: '通行费', nontax: '财政' };
+var TYPE_FILTER_LABELS = { special: '专票', plain: '普票', ticket: '车票', toll: '通行费', nontax: '非税', other: '其他' };
 var FORMAT_FILTER_LABELS = { pdf: 'PDF', ofd: 'OFD', image: '图片', xml: 'XML' };
 
 // 发票类型归一化：把各来源的原始类型串收敛成可比较的短标签
@@ -2023,8 +2023,9 @@ function syncTypeFilterButtons() {
   });
 }
 
-// 与票种 chip 共用 resolveInvoiceType 单一真源：财政/专票/普票对 XML/OFD/PDF 文字层
-// 等非 OCR 来源同样生效；车票/通行费直判分类标记（resolve 对车票返回的是标签全文）
+// 与票种 chip 共用 resolveInvoiceType 单一真源：非税/专票/普票对 XML/OFD/PDF 文字层
+// 等非 OCR 来源同样生效；车票/通行费直判分类标记（resolve 对车票返回的是标签全文）。
+// 「其他」= 列表上不渲染票种 chip 的文件（完全未识别 + 识别了但无法归专普的粗粒度串）
 function isTypeMatch(f) {
   switch (S.typeFilter) {
     case 'ticket': return !!f._isTicket;
@@ -2032,6 +2033,10 @@ function isTypeMatch(f) {
     case 'nontax': return resolveInvoiceType(f) === '非税票据';
     case 'special': return resolveInvoiceType(f) === '专票';
     case 'plain': return resolveInvoiceType(f) === '普票';
+    case 'other':
+      if (f._isTicket || f._isToll) return false;
+      var t = resolveInvoiceType(f);
+      return t !== '专票' && t !== '普票' && t !== '非税票据';
     default: return true; // 旧配置残留的 'vat' 等未知值按全部处理
   }
 }

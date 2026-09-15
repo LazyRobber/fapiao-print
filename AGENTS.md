@@ -141,7 +141,7 @@ Rust generate_pdf_from_layout() — lopdf 直通管道 → 失败回退 printpdf
 
 **PDF 渲染双引擎**：首选 WinRT（`render_pdf_pages`，`check_winrt_pdf_available()` 启动检测）→ 失败回退 PDFium（`render_pdf_pages_pdfium`）。
 
-**筛选体系**（侧边栏，可折叠）：类型（专票/普票/车票/通行费/财政 `S.typeFilter`）× 格式（PDF/OFD/图片/XML `S.formatFilter`）× 状态（全部/未打印/已打印/重复 `S.printedFilter`/`S.fileFilter`）三维正交；类型匹配与票种 chip 共用 `resolveInvoiceType` 单一真源（车票/通行费直判 `_isTicket`/`_isToll` 分类标记），专票/普票/财政对 XML/OFD/PDF 文字层等非 OCR 来源同样生效；类型/格式切换即切换打印批次，`clearInvisibleChecks()` 清除不可见勾选（防筛选切换后残留勾选重复打印）。列表上方工具栏（`.file-header`）与筛选区（`.filter-section`）sticky 钉在滚动容器顶部，仅列表滚动。
+**筛选体系**（侧边栏，可折叠）：类型（专票/普票/车票/通行费/非税/其他 `S.typeFilter`）× 格式（PDF/OFD/图片/XML `S.formatFilter`）× 状态（全部/未打印/已打印/重复 `S.printedFilter`/`S.fileFilter`）三维正交；类型匹配与票种 chip 共用 `resolveInvoiceType` 单一真源（车票/通行费直判 `_isTicket`/`_isToll` 分类标记），「其他」= 不渲染票种 chip 的文件（未识别 + 无法归专普的粗粒度串），非税/专票/普票对 XML/OFD/PDF 文字层等非 OCR 来源同样生效；类型/格式切换即切换打印批次，`clearInvisibleChecks()` 清除不可见勾选（防筛选切换后残留勾选重复打印）。列表上方工具栏（`.file-header`）与筛选区（`.filter-section`）sticky 钉在滚动容器顶部，仅列表滚动。
 
 **文件列表双视图**：`S.fileView`（list/grid），`renderFileList()` grid 分支输出 `.file-card`；`updateFileItem()` 按视图增量更新。
 

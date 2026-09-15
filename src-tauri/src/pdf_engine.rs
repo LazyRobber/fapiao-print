@@ -3389,9 +3389,9 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     }
 
     // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角与坐标换算误差。
-    // 左/上 6px（≈0.5mm，用户要求尽量小）、右侧 28px（≈2.4mm）：发票右侧常有
+    // 左/上 3px（≈0.25mm，用户指定）、右侧 28px（≈2.4mm）：发票右侧常有
     // 「下载次数」「密码区」这类浅色小字，检测容易漏掉最右几个字，多留更安全。
-    let (p_l, p_t, p_r, p_b) = (6u32, 6u32, 28u32, 12u32);
+    let (p_l, p_t, p_r, p_b) = (3u32, 3u32, 28u32, 12u32);
     let top    = top.saturating_sub(p_t);
     let left   = left.saturating_sub(p_l);
     let bottom = (bottom + p_b).min(h - 1);

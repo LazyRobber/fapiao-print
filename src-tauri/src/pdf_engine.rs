@@ -1594,7 +1594,10 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
         .ok_or_else(|| format!("PDF页面索引{}不存在", page_idx))?;
 
     // Get page dimensions (pt units)
-    let ((_x1, _y1, _x2, _y2), (page_w_pt, page_h_pt)) = get_page_effective_box(&doc, page_id)?;
+    // crop_x1/content_top：文本坐标到前端像素的换算基准 = 有效盒的左/顶边。
+    // 带 CropBox 的页面（如数电票只保留票面）有效盒高 ≠ MediaBox 高，
+    // 而 content stream 的坐标仍按完整页面书写 —— y 必须相对有效盒顶边（y2）换算。
+    let ((crop_x1, _y1, _x2, content_top), (page_w_pt, page_h_pt)) = get_page_effective_box(&doc, page_id)?;
     let scale = RENDER_DPI as f64 / 72.0; // pt → px
     let page_w_px = (page_w_pt as f64 * scale) as u32;
     let page_h_px = (page_h_pt as f64 * scale) as u32;
@@ -1962,10 +1965,15 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
         log::info!("PDF文本提取: 页面无文本操作(扫描件)，需OCR回退");
     }
 
-    // State tracking for text position
-    let mut cur_x: f64 = 0.0;
-    let mut cur_y: f64 = 0.0;
-    let mut line_start_x: f64 = 0.0; // x at start of current line (for Td offset)
+    // State tracking for text position.
+    // 文本位置 = CTM · Tm · (off_x, off_y)：Tm 是文本矩阵（可含翻转/旋转/缩放，
+    // 如数电票 PDF 用 `1 0 0 -1 0 0 Tm` 的顶左坐标系），off_* 是 Td/TJ 相对
+    // Tm 平移点的累计位移。此前忽略 Tm 线性部分，翻转坐标系 PDF 的坐标
+    // 全部落到页外、被钳成 y=0（整页并成一行、词序乱）。
+    let mut tm: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut off_x: f64 = 0.0;
+    let mut off_y: f64 = 0.0;
+    let mut line_start_off_x: f64 = 0.0; // x offset at start of current line (for T*)
     let mut font_size: f64 = 12.0;
     let mut leading: f64 = 0.0; // TL-set leading (0 = use font_size * 1.2)
     let mut current_font: Vec<u8> = Vec::new();
@@ -1981,9 +1989,10 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
     // Graphics state stack for q/Q
     #[derive(Clone)]
     struct GfxState {
-        x: f64,
-        y: f64,
-        line_start_x: f64,
+        tm: [f64; 6],
+        off_x: f64,
+        off_y: f64,
+        line_start_off_x: f64,
         font_size: f64,
         leading: f64,
         font_name: Vec<u8>,
@@ -1999,9 +2008,11 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
         match op.operator.as_str() {
             "BT" => {
                 in_text_block = true;
-                cur_x = 0.0;
-                cur_y = 0.0;
-                line_start_x = 0.0;
+                // PDF spec: BT resets the text matrix and line matrix to identity
+                tm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+                off_x = 0.0;
+                off_y = 0.0;
+                line_start_off_x = 0.0;
                 leading = 0.0;
                 need_space_before = false;
             }
@@ -2012,16 +2023,17 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
             }
             "q" => {
                 state_stack.push(GfxState {
-                    x: cur_x, y: cur_y, line_start_x,
+                    tm, off_x, off_y, line_start_off_x,
                     font_size, leading, font_name: current_font.clone(),
                     ctm,
                 });
             }
             "Q" => {
                 if let Some(state) = state_stack.pop() {
-                    cur_x = state.x;
-                    cur_y = state.y;
-                    line_start_x = state.line_start_x;
+                    tm = state.tm;
+                    off_x = state.off_x;
+                    off_y = state.off_y;
+                    line_start_off_x = state.line_start_off_x;
                     font_size = state.font_size;
                     leading = state.leading;
                     current_font = state.font_name;
@@ -2070,35 +2082,32 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
                 }
             }
             "Tm" if op.operands.len() >= 6 && in_text_block => {
-                // Text matrix: a b c d e f Tm
-                // e = x position, f = y position (in PDF coordinate space, pt)
-                // Font size = vertical scale = d (or sqrt(a²+b²) for rotated text)
-                let d = match &op.operands[3] {
-                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
-                };
-                cur_x = match &op.operands[4] {
-                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
-                };
-                cur_y = match &op.operands[5] {
-                    Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
-                };
-                // Use vertical component d for font size (more reliable than a)
-                if d > 1.0 { font_size = d; }
-                // Tm sets a new absolute position — this becomes the line start
-                line_start_x = cur_x;
+                // Text matrix: a b c d e f Tm — full replacement, may flip/rotate/scale
+                // (e.g. `1 0 0 -1 0 0 Tm` = top-left origin, y-down text space)
+                for (i, o) in op.operands.iter().take(6).enumerate() {
+                    match o {
+                        Object::Real(r) => tm[i] = *r as f64,
+                        Object::Integer(n) => tm[i] = *n as f64,
+                        _ => {}
+                    }
+                }
+                // Use vertical scale d for font size (more reliable than a)
+                if tm[3] > 1.0 { font_size = tm[3]; }
+                off_x = 0.0;
+                off_y = 0.0;
+                line_start_off_x = 0.0;
             }
             "Td" | "TD" if op.operands.len() >= 2 && in_text_block => {
-                // Move to next line: tx ty Td
-                // PDF spec: offset from start of current line, not from cur_x
+                // Move to next line: tx ty Td — offset in text space (Tm applied at Tj)
                 let tx = match &op.operands[0] {
                     Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
                 };
                 let ty = match &op.operands[1] {
                     Object::Real(r) => *r as f64, Object::Integer(i) => *i as f64, _ => 0.0
                 };
-                cur_x = line_start_x + tx;
-                line_start_x = cur_x;
-                cur_y += ty;
+                off_x += tx;
+                off_y += ty;
+                line_start_off_x = off_x;
             }
             "TL" if op.operands.len() >= 1 && in_text_block => {
                 // Set text leading
@@ -2111,23 +2120,21 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
             "T*" if in_text_block => {
                 // Move to start of next line (leading offset)
                 let effective_leading = if leading > 0.0 { leading } else { font_size * 1.2 };
-                cur_y -= effective_leading;
-                cur_x = line_start_x; // Return to line start
+                off_y -= effective_leading;
+                off_x = line_start_off_x; // Return to line start
             }
             "Tj" if in_text_block => {
                 // Show text string
                 if let Some(obj) = op.operands.first() {
                     if let Some(decoded) = decode_text_object(obj, &lopdf_encodings, &tounicode_cmaps, &current_font, &font_encoding_names) {
                         if !decoded.is_empty() {
-                            // Apply CTM to get page coordinates
-                            let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
-                            let word = make_word(&decoded, px, py, font_size, page_h_pt, scale);
+                            let word = make_word(&decoded, &ctm, &tm, off_x, off_y, font_size, content_top as f64, crop_x1 as f64, scale);
                             all_words.push(word);
                             if need_space_before { full_text_parts.push(" ".to_string()); }
                             full_text_parts.push(decoded.clone());
                             need_space_before = true;
                             // Advance x position by approximate text width
-                            cur_x += approximate_text_width(&decoded, font_size);
+                            off_x += approximate_text_width(&decoded, font_size);
                         }
                     }
                 }
@@ -2151,39 +2158,36 @@ fn extract_pdf_text_from_doc(doc: &lopdf::Document, pdf_path: &str, page_idx: u3
                                 let kern_f = *kern as f64;
                                 // Only flush on large negative kern (word break)
                                 if !text_buf.is_empty() && kern_f < KERN_WORD_BREAK {
-                                    let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
-                                    let word = make_word(&text_buf, px, py, font_size, page_h_pt, scale);
+                                    let word = make_word(&text_buf, &ctm, &tm, off_x, off_y, font_size, content_top as f64, crop_x1 as f64, scale);
                                     all_words.push(word);
                                     if need_space_before { full_text_parts.push(" ".to_string()); }
                                     full_text_parts.push(text_buf.clone());
                                     need_space_before = true;
-                                    cur_x += approximate_text_width(&text_buf, font_size);
+                                    off_x += approximate_text_width(&text_buf, font_size);
                                     text_buf.clear();
                                 }
                                 // Apply kern offset
-                                cur_x += kern_f / 1000.0 * font_size;
+                                off_x += kern_f / 1000.0 * font_size;
                             }
                             Object::Real(kern) => {
                                 let kern_f = *kern as f64;
                                 if !text_buf.is_empty() && kern_f < KERN_WORD_BREAK {
-                                    let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
-                                    let word = make_word(&text_buf, px, py, font_size, page_h_pt, scale);
+                                    let word = make_word(&text_buf, &ctm, &tm, off_x, off_y, font_size, content_top as f64, crop_x1 as f64, scale);
                                     all_words.push(word);
                                     if need_space_before { full_text_parts.push(" ".to_string()); }
                                     full_text_parts.push(text_buf.clone());
                                     need_space_before = true;
-                                    cur_x += approximate_text_width(&text_buf, font_size);
+                                    off_x += approximate_text_width(&text_buf, font_size);
                                     text_buf.clear();
                                 }
-                                cur_x += kern_f / 1000.0 * font_size;
+                                off_x += kern_f / 1000.0 * font_size;
                             }
                             _ => {}
                         }
                     }
                     // Flush remaining text
                     if !text_buf.is_empty() {
-                        let (px, py) = apply_ctm(&ctm, cur_x, cur_y);
-                        let word = make_word(&text_buf, px, py, font_size, page_h_pt, scale);
+                        let word = make_word(&text_buf, &ctm, &tm, off_x, off_y, font_size, content_top as f64, crop_x1 as f64, scale);
                         all_words.push(word);
                         if need_space_before { full_text_parts.push(" ".to_string()); }
                         full_text_parts.push(text_buf);
@@ -2221,14 +2225,20 @@ fn apply_ctm(ctm: &[f64; 6], x: f64, y: f64) -> (f64, f64) {
     (a * x + c * y + e, b * x + d * y + f)
 }
 
-fn make_word(text: &str, pdf_x: f64, pdf_y: f64, font_size: f64,
-             page_h_pt: f32, scale: f64) -> PdfTextWord {
+fn make_word(text: &str, ctm: &[f64; 6], tm: &[f64; 6], off_x: f64, off_y: f64,
+             font_size: f64, content_top: f64, crop_x1: f64, scale: f64) -> PdfTextWord {
+    // 文本位置 = CTM · Tm · (off_x, off_y)：Tm 先作用于文本空间位移
+    // （含顶左翻转等），CTM 再映射到页面坐标。
+    let tx_pt = tm[0] * off_x + tm[2] * off_y + tm[4];
+    let ty_pt = tm[1] * off_x + tm[3] * off_y + tm[5];
+    let (px, py) = apply_ctm(ctm, tx_pt, ty_pt);
     let w = approximate_text_width(text, font_size) * scale;
     let h = font_size * scale;
-    // Convert: frontend_y = (page_h - pdf_y - font_size) * scale
+    // Convert: frontend_y = (content_top - pdf_y - font_size) * scale
     // The y in PDF is the baseline; the top of the glyph is approximately at y + font_size
-    let fx = pdf_x * scale;
-    let fy = (page_h_pt as f64 - pdf_y - font_size) * scale;
+    // content_top = 有效盒顶边（CropBox 场景下 ≠ MediaBox 高，见调用处）
+    let fx = (px - crop_x1) * scale;
+    let fy = (content_top - py - font_size) * scale;
     PdfTextWord {
         text: text.to_string(),
         x: fx,
@@ -6610,3 +6620,40 @@ fn build_border_ops_lopdf(
     Some(lopdf::content::Content { operations: ops })
 }
 
+
+
+#[cfg(test)]
+mod pdf_text_tests {
+    use super::*;
+
+    /// 数电票顶左坐标系：页面 cm 翻转缩放 + Tm 翻转 + Td 负 y 位移
+    /// （此前该场景 fy 为负被 max(0.0) 全部钳成 0，整页并成一行）
+    #[test]
+    fn test_make_word_top_left_coordinate_system() {
+        let ctm = [0.75, 0.0, 0.0, -0.75, 0.0, 842.0];
+        let tm = [1.0, 0.0, 0.0, -1.0, 0.0, 0.0];
+        let w = make_word("开", &ctm, &tm, 73.0, -511.0, 12.0, 842.0, 0.0, 4.1667);
+        // 文本空间点 = (73, 511)（Tm 翻转 y）→ device = (54.75, 458.75)
+        assert!((w.x - 54.75 * 4.1667).abs() < 0.1);
+        assert!((w.y - (842.0 - 458.75 - 12.0) * 4.1667).abs() < 1.0, "y={}", w.y);
+    }
+
+    /// 常规场景：Tm 全量定位（a=d=1，e/f 即位置），off 为零
+    #[test]
+    fn test_make_word_standard_translation_tm() {
+        let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let tm = [1.0, 0.0, 0.0, 1.0, 100.0, 700.0];
+        let w = make_word("发", &ctm, &tm, 0.0, 0.0, 10.0, 842.0, 0.0, 1.0);
+        assert!((w.x - 100.0).abs() < 0.001);
+        assert!((w.y - 132.0).abs() < 0.001, "y={}", w.y);
+    }
+
+    /// CropBox 左侧裁剪：x 相对有效盒左边换算
+    #[test]
+    fn test_make_word_cropbox_offset() {
+        let ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let tm = [1.0, 0.0, 0.0, 1.0, 50.0, 700.0];
+        let w = make_word("票", &ctm, &tm, 0.0, 0.0, 10.0, 842.0, 30.0, 1.0);
+        assert!((w.x - 20.0).abs() < 0.001);
+    }
+}

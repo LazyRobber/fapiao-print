@@ -3341,10 +3341,19 @@ pub const EDGE_THRESHOLD: u8 = 245;
 /// 一行/列至少这么多非白像素才算「有内容」，抑制照片/JPEG 的孤立浅色噪点
 pub const MIN_CONTENT_PIXELS: u32 = 2;
 
-/// 检测白边范围，返回裁剪框（含 12/28px 内边距，已 clamp 到图像边界）。
+/// 裁剪后向外保留的边距（px）默认值与上限。
+/// 默认 3px（@300dpi ≈ 0.25mm）—— 检测已按真实内容边界，pad 只需容忍抗锯齿。
+/// 上限 60px（≈5mm）：再大就失去"裁掉白边"的意义了；也为防止极端输入
+/// 让裁剪框反转（60px 远小于任何发票短边）。
+pub const TRIM_PAD_DEFAULT: u32 = 3;
+pub const TRIM_PAD_MAX: u32 = 60;
+
+/// 检测白边范围，返回裁剪框。
 /// `threshold`: 左右方向（列）判定用；上下方向（行）固定用 EDGE_THRESHOLD。
+/// `pad`: 向外保留的边距（px）—— 容忍内容边缘抗锯齿与坐标换算误差，
+///        由前端「留边」配置项提供（0–TRIM_PAD_MAX，clamp）。
 /// 整图全白 / 无有效内容时返回 None。
-pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBox> {
+pub fn trim_white_box(img: &image::DynamicImage, threshold: u8, pad: u32) -> Option<TrimBox> {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     if w == 0 || h == 0 {
@@ -3390,10 +3399,10 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
         return None;
     }
 
-    // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角与坐标换算误差。
-    // 四边统一 3px（≈0.25mm）—— 检测已按真实内容边界（列全高 + 左右宽松
-    // 阈值保护浅字），无需再按方向加大兜底；真实样本实测四边保留均为 0.25mm。
-    let (p_l, p_t, p_r, p_b) = (3u32, 3u32, 3u32, 3u32);
+    // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角（如印章圆弧顶）与换算误差。
+    // 由前端「留边」配置项提供（默认 3px ≈ 0.25mm，上限 TRIM_PAD_MAX）。
+    let p = pad.min(TRIM_PAD_MAX);
+    let (p_l, p_t, p_r, p_b) = (p, p, p, p);
     let top    = top.saturating_sub(p_t);
     let left   = left.saturating_sub(p_l);
     let bottom = (bottom + p_b).min(h - 1);
@@ -3404,11 +3413,12 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
 
 /// Trim white edges from an image.
 /// `threshold`: pixels where R, G, B are all >= threshold are considered "white".
-/// Returns the cropped image with 5px padding plus its crop box
+/// `pad`: 向外保留的边距（px，0–TRIM_PAD_MAX，前端「留边」配置项）
+/// Returns the cropped image plus its crop box
 /// (None when nothing was cropped — all-white image).
 /// 裁剪框供 PDF 直通路径做矢量裁切换算（见 trim_white_box）。
-pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> (image::DynamicImage, Option<TrimBox>) {
-    match trim_white_box(img, threshold) {
+pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8, pad: u32) -> (image::DynamicImage, Option<TrimBox>) {
+    match trim_white_box(img, threshold, pad) {
         Some([x, y, cw, ch]) => {
             let rgba = img.to_rgba8();
             let cropped = image::imageops::crop_imm(&rgba, x, y, cw, ch);
@@ -3458,6 +3468,9 @@ pub struct RenderSettings {
     pub border_width: Option<f32>,
     pub border_color: Option<String>,
     pub trim_white: Option<bool>,
+    /// 裁剪后向外保留的边距（px，前端「留边」配置项；缺省 3，上限 60）
+    #[serde(default)]
+    pub trim_pad: Option<u32>,
     pub footer_text: Option<String>,
     pub footer_margin: f32,
     pub custom_fm: bool,
@@ -4052,6 +4065,7 @@ fn decode_images(
     use rayon::prelude::*;
 
     let trim = settings.trim_white.unwrap_or(false);
+    let trim_pad = settings.trim_pad.unwrap_or(TRIM_PAD_DEFAULT).min(TRIM_PAD_MAX);
     let color_mode = settings.color_mode.clone();
 
     // Parallel decode — each file is independent
@@ -4137,7 +4151,7 @@ fn decode_images(
             // Apply trim (global setting, not per-slot)
             // 位图路径：裁剪直接烘焙进像素，不需要保留裁剪框
             if trim {
-                img = trim_white_edges(&img, WHITE_THRESHOLD).0;
+                img = trim_white_edges(&img, WHITE_THRESHOLD, trim_pad).0;
             }
 
             // Apply color mode (global setting, not per-slot)

@@ -71,7 +71,7 @@ var S = {
   fileView: 'list',
   ocrPrecision: 'standard',
   feat: {
-    cutline: true, number: false, border: false, trimWhite: false,
+    cutline: true, number: false, border: false, trimWhite: false, trimPad: 3,
     watermark: false, collate: true, duplex: false, pageNum: false,
     printDate: false, footer: false,
     copyBadge: false,
@@ -3060,6 +3060,29 @@ function clearTrimCache(f) {
   f.trimmedH = 0;
 }
 
+// 裁剪留边上限（px，@300dpi 60px ≈ 5mm）—— 与 Rust 端 TRIM_PAD_MAX 保持一致
+var TRIM_PAD_MAX = 60;
+
+/** 当前裁剪留边（px）：唯一数据源是 S.feat.trimPad，非法值回退 3 */
+function getTrimPad() {
+  var n = parseInt(S.feat.trimPad, 10);
+  if (isNaN(n)) n = 3;
+  return Math.max(0, Math.min(TRIM_PAD_MAX, n));
+}
+
+/** 设置裁剪留边（px，0–TRIM_PAD_MAX）：改变后需清白边缓存并按新值重算 */
+function setTrimPad(v) {
+  var n = parseInt(v, 10);
+  if (isNaN(n)) n = 3;
+  n = Math.max(0, Math.min(TRIM_PAD_MAX, n));
+  document.getElementById('trimPad').value = n;
+  if (n === S.feat.trimPad) return;
+  S.feat.trimPad = n;
+  S.files.forEach(function(f) { clearTrimCache(f); });
+  if (S.feat.trimWhite) processTrim(); else updatePreview();
+  saveSettings();
+}
+
 /** 单票调整面板「文本增强」开关：增强作用于原图全分辨率，打印清晰度不受影响 */
 function toggleTextEnhance() {
   var f = getSelectedFileObj();
@@ -3474,7 +3497,7 @@ async function processTrim() {
     for (var i = 0; i < S.files.length; i++) {
       var f = S.files[i];
       if (f.previewUrl && !f.trimmedUrl) {
-        var trimmed = await invoke('trim_image', { dataUrl: f.previewUrl });
+        var trimmed = await invoke('trim_image', { dataUrl: f.previewUrl, pad: getTrimPad() });
         if (!trimmed || !trimmed.dataUrl) continue;
         f.trimmedUrl = trimmed.dataUrl;
         var tb = trimmed.trimBox;
@@ -3525,6 +3548,7 @@ function getSettings() {
     globalRotation: document.getElementById('globalRotation').value,
     cutline: S.feat.cutline, number: S.feat.number, border: S.feat.border,
     borderWidth: 1, borderColor: '#000000', trimWhite: S.feat.trimWhite,
+    trimPad: getTrimPad(),
     copyBadge: S.feat.copyBadge,
     watermark: S.feat.watermark,
     watermarkText: document.getElementById('wmText').value,
@@ -3716,6 +3740,7 @@ function saveSettings() {
   var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM','slotAdjMemory','fileListMemory','autoDedup','reimburse','copyBadge'];
   featKeys.forEach(function(k) { o.feat[k] = S.feat[k]; });
   o.reimburseHeight = document.getElementById('reimburseHeight').value;
+  o.trimPad = getTrimPad();
   o.quickLayouts = cloneQuickLayouts(S.quickLayouts);
   o.quickLayoutMax = normalizeQuickLayoutMax(S.quickLayoutMax);
   o.fileView = S.fileView;
@@ -3869,6 +3894,11 @@ function loadSettings() {
     document.getElementById('footerMarginN').value = o.footerMargin;
   }
   if (o.reimburseHeight != null) document.getElementById('reimburseHeight').value = o.reimburseHeight;
+  if (o.trimPad != null) {
+    var _tp = parseInt(o.trimPad, 10);
+    S.feat.trimPad = isNaN(_tp) ? 3 : Math.max(0, Math.min(TRIM_PAD_MAX, _tp));
+  }
+  document.getElementById('trimPad').value = getTrimPad();
   syncReimburseUI();
   // Restore summary table column selection
   if (o.summaryCols && Array.isArray(o.summaryCols) && o.summaryCols.length > 0) {
@@ -4002,7 +4032,7 @@ function resetSettings(scope) {
   // scope='layout'：仅恢复「排版」页（纸张/行列/边距/间距/水印等），不动打印与偏好（issue #33）
   var layoutOnly = scope === 'layout';
   if (!confirm(layoutOnly ? '仅恢复「排版」页默认设置（纸张/行列/边距/间距/水印等），不影响打印、OCR、主题等偏好？' : '确认恢复所有默认设置？')) return;
-  var featDefaults = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true, slotAdjMemory: false, fileListMemory: false, autoDedup: false, reimburse: false, copyBadge: false };
+  var featDefaults = { cutline: true, number: false, border: false, trimWhite: false, trimPad: 3, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true, slotAdjMemory: false, fileListMemory: false, autoDedup: false, reimburse: false, copyBadge: false };
   S.layout = { cols: 1, rows: 1 };
   if (layoutOnly) {
     ['cutline','number','border','trimWhite','watermark','reimburse','copyBadge'].forEach(function(k) { S.feat[k] = featDefaults[k]; });
@@ -4047,6 +4077,8 @@ function resetSettings(scope) {
   document.getElementById('toggleWatermark').classList.remove('on');
   document.getElementById('toggleReimburse').classList.remove('on');
   document.getElementById('reimburseHeight').value = 120;
+  S.feat.trimPad = 3;
+  document.getElementById('trimPad').value = 3;
   syncReimburseUI();
   if (layoutOnly) {
     syncLayoutHighlight();

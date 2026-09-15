@@ -542,14 +542,16 @@ struct TrimImageResult {
 }
 
 /// Trim white edges from an image (base64 data URL → 裁剪后 data URL + 裁剪框)
+/// `pad`: 裁剪后向外保留的边距（px，前端「留边」配置项；缺省 3，上限 60）
 #[command]
-fn trim_image(data_url: String) -> Result<TrimImageResult, String> {
+fn trim_image(data_url: String, pad: Option<u32>) -> Result<TrimImageResult, String> {
     use base64::Engine;
     use std::io::Cursor;
 
     let img = pdf_engine::decode_base64_image(&data_url)
         .map_err(|e| format!("解码失败: {}", e))?;
-    let (trimmed, trim_box) = pdf_engine::trim_white_edges(&img, pdf_engine::WHITE_THRESHOLD);
+    let pad = pad.unwrap_or(pdf_engine::TRIM_PAD_DEFAULT).min(pdf_engine::TRIM_PAD_MAX);
+    let (trimmed, trim_box) = pdf_engine::trim_white_edges(&img, pdf_engine::WHITE_THRESHOLD, pad);
 
     // Encode back to PNG base64
     let mut buf = Cursor::new(Vec::new());

@@ -3368,11 +3368,13 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     let top = (0..h as usize).find(|&y| row_soft[y] >= MIN_CONTENT_PIXELS)? as u32;
     let bottom = (0..h as usize).rev().find(|&y| row_soft[y] >= MIN_CONTENT_PIXELS)? as u32;
 
-    // 列统计限定在 top..=bottom（与旧实现一致）
+    // 列统计扫全高（0..h）：左右边界必须包含**所有**内容，不能限定在行检测的
+    // top..bottom 内 —— 否则位于该范围外的左右内容（如超出主体行范围的竖排
+    // 浅字）会被漏检，导致边界内缩、把内容裁掉。
     let mut col_soft = vec![0u32; w as usize];
     for x in 0..w {
         let mut ds = 0u32;
-        for y in top..=bottom {
+        for y in 0..h {
             let p = rgba.get_pixel(x, y);
             // 左右方向用宽松阈值（保护「下载次数」这类浅色小字）
             if p[0].min(p[1]).min(p[2]) < threshold {
@@ -3389,9 +3391,9 @@ pub fn trim_white_box(img: &image::DynamicImage, threshold: u8) -> Option<TrimBo
     }
 
     // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角与坐标换算误差。
-    // 左/上 3px（≈0.25mm，用户指定）、右侧 28px（≈2.4mm）：发票右侧常有
-    // 「下载次数」「密码区」这类浅色小字，检测容易漏掉最右几个字，多留更安全。
-    let (p_l, p_t, p_r, p_b) = (3u32, 3u32, 28u32, 12u32);
+    // 四边统一 3px（≈0.25mm）—— 检测已按真实内容边界（列全高 + 左右宽松
+    // 阈值保护浅字），无需再按方向加大兜底；真实样本实测四边保留均为 0.25mm。
+    let (p_l, p_t, p_r, p_b) = (3u32, 3u32, 3u32, 3u32);
     let top    = top.saturating_sub(p_t);
     let left   = left.saturating_sub(p_l);
     let bottom = (bottom + p_b).min(h - 1);

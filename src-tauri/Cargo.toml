@@ -32,7 +32,7 @@ dirs = "5"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico", "bmp", "tiff", "webp"] }
 ab_glyph = "0.2"
-printpdf = { version = "0.9", features = ["images"] }
+printpdf = { version = "0.9", default-features = false, features = ["images"] }
 lopdf = "0.39"
 encoding_rs = "0.8"
 rayon = "1.10"
@@ -41,8 +41,8 @@ ocr-rs = { version = "2.4", optional = true }
 invoice-engine = { path = "invoice-engine" }
 flate2 = "1.1.9"
 tar = "0.4"
-zip = "2"
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+ureq = "2"
 libloading = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]

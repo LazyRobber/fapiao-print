@@ -532,15 +532,26 @@ fn show_window(app: tauri::AppHandle) {
 // New Commands: Trim Image & Layout-based PDF Generation
 // =====================================================
 
-/// Trim white edges from an image (base64 data URL → trimmed base64 data URL)
+/// 白边裁剪结果：裁剪后的图像 + 裁剪框（供 PDF 直通路径做矢量裁切换算）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrimImageResult {
+    data_url: String,
+    /// [x, y, w, h]，像素坐标、原点左上，基于入参位图；未检测到白边时为 None
+    trim_box: Option<pdf_engine::TrimBox>,
+}
+
+/// Trim white edges from an image (base64 data URL → 裁剪后 data URL + 裁剪框)
+/// `pad`: 裁剪后向外保留的边距（px，前端「留边」配置项；缺省 3，上限 60）
 #[command]
-fn trim_image(data_url: String) -> Result<String, String> {
+fn trim_image(data_url: String, pad: Option<u32>) -> Result<TrimImageResult, String> {
     use base64::Engine;
     use std::io::Cursor;
 
     let img = pdf_engine::decode_base64_image(&data_url)
         .map_err(|e| format!("解码失败: {}", e))?;
-    let trimmed = pdf_engine::trim_white_edges(&img, 245);
+    let pad = pad.unwrap_or(pdf_engine::TRIM_PAD_DEFAULT).min(pdf_engine::TRIM_PAD_MAX);
+    let (trimmed, trim_box) = pdf_engine::trim_white_edges(&img, pdf_engine::WHITE_THRESHOLD, pad);
 
     // Encode back to PNG base64
     let mut buf = Cursor::new(Vec::new());
@@ -548,7 +559,10 @@ fn trim_image(data_url: String) -> Result<String, String> {
         .map_err(|e| format!("PNG编码失败: {}", e))?;
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
-    Ok(format!("data:image/png;base64,{}", b64))
+    Ok(TrimImageResult {
+        data_url: format!("data:image/png;base64,{}", b64),
+        trim_box,
+    })
 }
 
 /// Enhance a faint/blurry invoice image (levels stretch + gamma + unsharp mask).

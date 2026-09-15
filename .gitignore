@@ -44,3 +44,6 @@ sample/
 sample.ofd
 sample_ofd_extracted/
 test-emf-vector/
+
+# 临时诊断页（下划线开头），避免误提交
+_*.html

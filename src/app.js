@@ -71,7 +71,7 @@ var S = {
   fileView: 'list',
   ocrPrecision: 'standard',
   feat: {
-    cutline: true, number: false, border: false, trimWhite: false,
+    cutline: true, number: false, border: false, trimWhite: false, trimPad: 3,
     watermark: false, collate: true, duplex: false, pageNum: false,
     printDate: false, footer: false,
     copyBadge: false,
@@ -136,6 +136,12 @@ function createFileObj(opts) {
     slotScale: opts.slotScale || 1,        // 1.0 = default (contain-fit size)
     slotOffsetX: opts.slotOffsetX || 0,    // X offset in mm (0 = centered)
     slotOffsetY: opts.slotOffsetY || 0,    // Y offset in mm (0 = centered)
+    // 裁剪白边缓存：trimmedBox 为内容在渲染位图中的像素范围（供 PDF 矢量裁切换算），
+    // trimmedW/trimmedH 为裁剪后尺寸，未裁剪时为 0（回退到 ow/oh）
+    trimmedUrl: null,
+    trimmedBox: null,
+    trimmedW: 0,
+    trimmedH: 0,
     _printed: false                        // True after successful print
   };
 
@@ -920,6 +926,7 @@ async function processFileDataList(fileDataList) {
   _loadingBatchActive = false;
   _insertSlotIdx = -1;
   _lastInsertedId = null;
+  maybeAutoTrim();  // 裁剪白边开关跨会话记忆：加载完成后自动补裁剪
 
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
     _ocrToastActive = false;
@@ -1071,6 +1078,7 @@ async function processFiles(files) {
   _loadingBatchActive = false;
   _insertSlotIdx = -1;
   _lastInsertedId = null;
+  maybeAutoTrim();  // 裁剪白边开关跨会话记忆：加载完成后自动补裁剪
 
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
     _ocrToastActive = false;
@@ -1227,6 +1235,7 @@ async function processFilesIncremental(paths) {
   _loadingBatchActive = false;
   _insertSlotIdx = -1;
   _lastInsertedId = null;
+  maybeAutoTrim();  // 裁剪白边开关跨会话记忆：加载完成后自动补裁剪
   document.getElementById('fileList').classList.remove('batch-loading');
 
   if (_ocrQueue.length === 0 && _ocrRunning === 0) {
@@ -3043,6 +3052,37 @@ function canEnhanceFile(f) {
   return !!(f && f._filePath && !f._xmlInvoice && ENHANCE_IMAGE_TYPES.indexOf(f.type) >= 0);
 }
 
+/** 清空白边裁剪缓存（还原/增强后需按新图重算） */
+function clearTrimCache(f) {
+  f.trimmedUrl = null;
+  f.trimmedBox = null;
+  f.trimmedW = 0;
+  f.trimmedH = 0;
+}
+
+// 裁剪留边上限（px，@300dpi 60px ≈ 5mm）—— 与 Rust 端 TRIM_PAD_MAX 保持一致
+var TRIM_PAD_MAX = 60;
+
+/** 当前裁剪留边（px）：唯一数据源是 S.feat.trimPad，非法值回退 3 */
+function getTrimPad() {
+  var n = parseInt(S.feat.trimPad, 10);
+  if (isNaN(n)) n = 3;
+  return Math.max(0, Math.min(TRIM_PAD_MAX, n));
+}
+
+/** 设置裁剪留边（px，0–TRIM_PAD_MAX）：改变后需清白边缓存并按新值重算 */
+function setTrimPad(v) {
+  var n = parseInt(v, 10);
+  if (isNaN(n)) n = 3;
+  n = Math.max(0, Math.min(TRIM_PAD_MAX, n));
+  document.getElementById('trimPad').value = n;
+  if (n === S.feat.trimPad) return;
+  S.feat.trimPad = n;
+  S.files.forEach(function(f) { clearTrimCache(f); });
+  if (S.feat.trimWhite) processTrim(); else updatePreview();
+  saveSettings();
+}
+
 /** 单票调整面板「文本增强」开关：增强作用于原图全分辨率，打印清晰度不受影响 */
 function toggleTextEnhance() {
   var f = getSelectedFileObj();
@@ -3055,7 +3095,7 @@ function toggleTextEnhance() {
     f._origPreviewUrl = '';
     f._origImg = null;
     f._enhanced = false;
-    f.trimmedUrl = null; // 白边缓存基于原图，需按还原后的图重算
+    clearTrimCache(f); // 白边缓存基于原图，需按还原后的图重算
     updateAdjPanel();
     updatePreview();
     renderFileList();
@@ -3075,7 +3115,7 @@ function toggleTextEnhance() {
       // ow/oh 不变：增强不改动尺寸（EXIF 方向已在加载时与增强时一致烘焙）
       f._enhanced = true;
       f._enhancing = false;
-      f.trimmedUrl = null; // 白边缓存基于原图，需按增强后的图重算
+      clearTrimCache(f); // 白边缓存基于原图，需按增强后的图重算
       updateAdjPanel();
       updatePreview();
       renderFileList();
@@ -3137,8 +3177,9 @@ function setSlotAlignment(alignH, alignV) {
   // Use rotated visual dimensions — same as renderPage/PDF export (rotate-then-fit).
   // renderPage computes the wrapper from rotated visual dims; offsets move the
   // visual (post-rotation) box, so alignment gaps must use visual dims too.
-  var imgObjW = f.ow || 1;
-  var imgObjH = f.oh || 1;
+  var _alignDims = getObjDims(f, settings);
+  var imgObjW = _alignDims.w;
+  var imgObjH = _alignDims.h;
   var alignRot = getRotation(f, slot, settings);
   var alignRot90 = (alignRot === 90 || alignRot === 270);
   var fitW = alignRot90 ? imgObjH : imgObjW;
@@ -3229,7 +3270,23 @@ function quickLayout(c, r) {
   document.getElementById('customRows').value = r;
   document.getElementById('customCols').value = c;
 }
+/** 标签宽度按「每个 .sec 分组」分别测算：组内标签统一到该组最宽的标签，
+ *  这样组内起点对齐、又不会像整面板统一宽度那样让 1 字标签左侧空一大片。
+ *  在初始化 / 窗口尺寸变化 / 分块显隐后调用；未测算时 CSS 回退为内容宽度。 */
+function applyPerSectionLabelWidth() {
+  document.querySelectorAll('.sec').forEach(function(sec) {
+    sec.style.setProperty('--lbl-w', '0px');   // 先清零，量到的就是内容宽度
+    var max = 0;
+    sec.querySelectorAll('.lbl, .tlbl').forEach(function(lb) {
+      if (lb.offsetWidth === 0) return;        // 隐藏行的标签不参与
+      if (lb.offsetWidth > max) max = lb.offsetWidth;
+    });
+    sec.style.setProperty('--lbl-w', max + 'px');
+  });
+}
+
 function toggleFeature(k, btn) {
+  setTimeout(applyPerSectionLabelWidth, 0);   // 分块显隐后重算标签宽度
   var isOn = !S.feat[k]; // 切换后的状态
   S.feat[k] = isOn;
   btn.classList.toggle('on', isOn);
@@ -3262,6 +3319,7 @@ function toggleFeature(k, btn) {
   }
 
   if (k === 'watermark') document.getElementById('wmOpts').style.display = S.feat[k] ? 'block' : 'none';
+  if (k === 'trimWhite') document.getElementById('trimPadOpts').style.display = S.feat[k] ? 'block' : 'none';
   if (k === 'trimWhite' && S.feat[k]) processTrim();
   if (k === 'footer') {
     document.getElementById('footerOpts').style.display = S.feat[k] ? 'block' : 'none';
@@ -3441,6 +3499,11 @@ function setMP(t, b, l, r) {
 function changeCopies(d) { var e = document.getElementById('copies'); e.value = Math.max(1, Math.min(99, parseInt(e.value) + d)); updatePreview(); }
 
 // Trim whitespace — now delegates to Rust backend (10-50x faster)
+/** 批量加载结束后：若「裁剪白边」已开启（开关跨会话记忆），自动补裁剪 */
+function maybeAutoTrim() {
+  if (S.feat.trimWhite) processTrim();
+}
+
 async function processTrim() {
   if (!isTauri || !invoke) {
     toast('白边裁剪需要桌面版');
@@ -3451,7 +3514,13 @@ async function processTrim() {
     for (var i = 0; i < S.files.length; i++) {
       var f = S.files[i];
       if (f.previewUrl && !f.trimmedUrl) {
-        f.trimmedUrl = await invoke('trim_image', { dataUrl: f.previewUrl });
+        var trimmed = await invoke('trim_image', { dataUrl: f.previewUrl, pad: getTrimPad() });
+        if (!trimmed || !trimmed.dataUrl) continue;
+        f.trimmedUrl = trimmed.dataUrl;
+        var tb = trimmed.trimBox;
+        f.trimmedBox = (tb && tb[2] > 0 && tb[3] > 0) ? { x: tb[0], y: tb[1], w: tb[2], h: tb[3] } : null;
+        f.trimmedW = f.trimmedBox ? f.trimmedBox.w : 0;
+        f.trimmedH = f.trimmedBox ? f.trimmedBox.h : 0;
       }
     }
     hideLoading();
@@ -3496,6 +3565,7 @@ function getSettings() {
     globalRotation: document.getElementById('globalRotation').value,
     cutline: S.feat.cutline, number: S.feat.number, border: S.feat.border,
     borderWidth: 1, borderColor: '#000000', trimWhite: S.feat.trimWhite,
+    trimPad: getTrimPad(),
     copyBadge: S.feat.copyBadge,
     watermark: S.feat.watermark,
     watermarkText: document.getElementById('wmText').value,
@@ -3687,6 +3757,7 @@ function saveSettings() {
   var featKeys = ['cutline','number','border','trimWhite','watermark','collate','duplex','pageNum','printDate','footer','autoOpenPdf','customFM','slotAdjMemory','fileListMemory','autoDedup','reimburse','copyBadge'];
   featKeys.forEach(function(k) { o.feat[k] = S.feat[k]; });
   o.reimburseHeight = document.getElementById('reimburseHeight').value;
+  o.trimPad = getTrimPad();
   o.quickLayouts = cloneQuickLayouts(S.quickLayouts);
   o.quickLayoutMax = normalizeQuickLayoutMax(S.quickLayoutMax);
   o.fileView = S.fileView;
@@ -3816,6 +3887,9 @@ function loadSettings() {
     if (S.feat.watermark) {
       document.getElementById('wmOpts').style.display = 'block';
     }
+    if (S.feat.trimWhite) {
+      document.getElementById('trimPadOpts').style.display = 'block';
+    }
     if (S.feat.footer) {
       document.getElementById('footerOpts').style.display = 'block';
     }
@@ -3840,6 +3914,11 @@ function loadSettings() {
     document.getElementById('footerMarginN').value = o.footerMargin;
   }
   if (o.reimburseHeight != null) document.getElementById('reimburseHeight').value = o.reimburseHeight;
+  if (o.trimPad != null) {
+    var _tp = parseInt(o.trimPad, 10);
+    S.feat.trimPad = isNaN(_tp) ? 3 : Math.max(0, Math.min(TRIM_PAD_MAX, _tp));
+  }
+  document.getElementById('trimPad').value = getTrimPad();
   syncReimburseUI();
   // Restore summary table column selection
   if (o.summaryCols && Array.isArray(o.summaryCols) && o.summaryCols.length > 0) {
@@ -3973,7 +4052,7 @@ function resetSettings(scope) {
   // scope='layout'：仅恢复「排版」页（纸张/行列/边距/间距/水印等），不动打印与偏好（issue #33）
   var layoutOnly = scope === 'layout';
   if (!confirm(layoutOnly ? '仅恢复「排版」页默认设置（纸张/行列/边距/间距/水印等），不影响打印、OCR、主题等偏好？' : '确认恢复所有默认设置？')) return;
-  var featDefaults = { cutline: true, number: false, border: false, trimWhite: false, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true, slotAdjMemory: false, fileListMemory: false, autoDedup: false, reimburse: false, copyBadge: false };
+  var featDefaults = { cutline: true, number: false, border: false, trimWhite: false, trimPad: 3, watermark: false, footer: false, customFM: false, collate: true, duplex: false, pageNum: false, printDate: false, autoOpenPdf: true, ocrEnabled: false, pdfTextEnabled: true, slotAdjMemory: false, fileListMemory: false, autoDedup: false, reimburse: false, copyBadge: false };
   S.layout = { cols: 1, rows: 1 };
   if (layoutOnly) {
     ['cutline','number','border','trimWhite','watermark','reimburse','copyBadge'].forEach(function(k) { S.feat[k] = featDefaults[k]; });
@@ -4004,6 +4083,7 @@ function resetSettings(scope) {
   document.getElementById('customPaperRow').style.display = 'none';
   document.getElementById('customScaleRow').style.display = 'none';
   document.getElementById('wmOpts').style.display = 'none';
+  document.getElementById('trimPadOpts').style.display = 'none';
   document.getElementById('wmText').value = '已打印';
   document.getElementById('wmOpacity').value = 20; document.getElementById('wmOpacityN').value = 20;
   document.getElementById('wmColor').value = '#ff0000';
@@ -4018,6 +4098,8 @@ function resetSettings(scope) {
   document.getElementById('toggleWatermark').classList.remove('on');
   document.getElementById('toggleReimburse').classList.remove('on');
   document.getElementById('reimburseHeight').value = 120;
+  S.feat.trimPad = 3;
+  document.getElementById('trimPad').value = 3;
   syncReimburseUI();
   if (layoutOnly) {
     syncLayoutHighlight();
@@ -4213,7 +4295,7 @@ window.addEventListener('drop', function() {
   _dragDepth = 0;
   window._tauriDragHover(false);
 });
-window.addEventListener('resize', function() { if (S.files.length) updatePreview(); });
+window.addEventListener('resize', function() { applyPerSectionLabelWidth(); if (S.files.length) updatePreview(); });
 
 // beforeunload safety net — stop all work if the window is being destroyed
 // (covers cases where _tauriCleanup() wasn't called or didn't execute in time)
@@ -4359,6 +4441,7 @@ var _renameSeparator = '_';
 
 // Restore all layout & feature settings
 loadSettings();
+applyPerSectionLabelWidth();
 
 // Render quick layout buttons — also covers first run (loadSettings returns early with no saved data)
 renderQuickLayoutBar();

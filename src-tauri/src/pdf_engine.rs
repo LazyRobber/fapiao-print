@@ -3324,79 +3324,108 @@ pub fn check_ocr_available() -> bool { false }
 // White Edge Trimming
 // =====================================================
 
-/// Trim white edges from an image.
-/// `threshold`: pixels where R, G, B are all >= threshold are considered "white".
-/// Returns the cropped image with 5px padding.
-pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8) -> image::DynamicImage {
+/// 白边裁剪框：像素坐标，原点左上，[x, y, w, h]
+pub type TrimBox = [u32; 4];
+
+/// 左右方向（列）判定阈值：宽松 —— 发票右侧常有「下载次数：1」这类 250 上下的
+/// 浅灰细字（实测复现：245 阈值会把它们裁掉一小半），取 **253** 保护浅色小字。
+/// 电子发票白底是纯白 255，放宽无副作用。
+pub const WHITE_THRESHOLD: u8 = 253;
+
+/// 上下方向（行）判定阈值：严格 —— 只认**彩色/深色**内容（min 通道 < 245）。
+/// 页面顶/底的浅灰渐变、扫描阴影是 R=G=B≈252 的纯灰，min 通道仍是 252，
+/// 不会被误保留（否则上下白边裁不干净）；而红色印章 G/B 通道远低于 R，
+/// min 通道很低，照样被保留。
+pub const EDGE_THRESHOLD: u8 = 245;
+
+/// 一行/列至少这么多非白像素才算「有内容」，抑制照片/JPEG 的孤立浅色噪点
+pub const MIN_CONTENT_PIXELS: u32 = 2;
+
+/// 裁剪后向外保留的边距（px）默认值与上限。
+/// 默认 3px（@300dpi ≈ 0.25mm）—— 检测已按真实内容边界，pad 只需容忍抗锯齿。
+/// 上限 60px（≈5mm）：再大就失去"裁掉白边"的意义了；也为防止极端输入
+/// 让裁剪框反转（60px 远小于任何发票短边）。
+pub const TRIM_PAD_DEFAULT: u32 = 3;
+pub const TRIM_PAD_MAX: u32 = 60;
+
+/// 检测白边范围，返回裁剪框。
+/// `threshold`: 左右方向（列）判定用；上下方向（行）固定用 EDGE_THRESHOLD。
+/// `pad`: 向外保留的边距（px）—— 容忍内容边缘抗锯齿与坐标换算误差，
+///        由前端「留边」配置项提供（0–TRIM_PAD_MAX，clamp）。
+/// 整图全白 / 无有效内容时返回 None。
+pub fn trim_white_box(img: &image::DynamicImage, threshold: u8, pad: u32) -> Option<TrimBox> {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     if w == 0 || h == 0 {
-        return img.clone();
+        return None;
     }
+    // 上下方向的判定阈值（严格，见 EDGE_THRESHOLD 注释）
+    let edge = EDGE_THRESHOLD.min(threshold);
 
-    // Find top
-    let mut top = 0u32;
-    'outer: for y in 0..h {
+    // 行「非白」像素计数（上下方向：只认彩色/深色，忽略浅灰渐变）
+    let mut row_soft = vec![0u32; h as usize];
+    for y in 0..h {
+        let mut ds = 0u32;
         for x in 0..w {
             let p = rgba.get_pixel(x, y);
-            if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                top = y;
-                break 'outer;
+            if p[0].min(p[1]).min(p[2]) < edge {
+                ds += 1;
             }
         }
+        row_soft[y as usize] = ds;
     }
+    let top = (0..h as usize).find(|&y| row_soft[y] >= MIN_CONTENT_PIXELS)? as u32;
+    let bottom = (0..h as usize).rev().find(|&y| row_soft[y] >= MIN_CONTENT_PIXELS)? as u32;
 
-    // Find bottom
-    let mut bottom = h - 1;
-    'outer2: for y in (0..h).rev() {
-        for x in 0..w {
+    // 列统计扫全高（0..h）：左右边界必须包含**所有**内容，不能限定在行检测的
+    // top..bottom 内 —— 否则位于该范围外的左右内容（如超出主体行范围的竖排
+    // 浅字）会被漏检，导致边界内缩、把内容裁掉。
+    let mut col_soft = vec![0u32; w as usize];
+    for x in 0..w {
+        let mut ds = 0u32;
+        for y in 0..h {
             let p = rgba.get_pixel(x, y);
-            if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                bottom = y;
-                break 'outer2;
+            // 左右方向用宽松阈值（保护「下载次数」这类浅色小字）
+            if p[0].min(p[1]).min(p[2]) < threshold {
+                ds += 1;
             }
         }
+        col_soft[x as usize] = ds;
     }
-
-    // Find left
-    let mut left = 0u32;
-    'outer3: for x in 0..w {
-        for y in top..=bottom {
-            let p = rgba.get_pixel(x, y);
-            if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                left = x;
-                break 'outer3;
-            }
-        }
-    }
-
-    // Find right
-    let mut right = w - 1;
-    'outer4: for x in (0..w).rev() {
-        for y in top..=bottom {
-            let p = rgba.get_pixel(x, y);
-            if p[0] < threshold || p[1] < threshold || p[2] < threshold {
-                right = x;
-                break 'outer4;
-            }
-        }
-    }
+    let left = (0..w as usize).find(|&x| col_soft[x] >= MIN_CONTENT_PIXELS)? as u32;
+    let right = (0..w as usize).rev().find(|&x| col_soft[x] >= MIN_CONTENT_PIXELS)? as u32;
 
     if top >= bottom || left >= right {
-        return img.clone();
+        return None;
     }
 
-    // Add 5px padding, clamp to image bounds
-    let p: u32 = 5;
-    let top    = top.saturating_sub(p);
-    let left   = left.saturating_sub(p);
-    let bottom = (bottom + p).min(h - 1);
-    let right  = (right + p).min(w - 1);
+    // 向外留边距再裁：容忍内容边缘的抗锯齿/尖角（如印章圆弧顶）与换算误差。
+    // 由前端「留边」配置项提供（默认 3px ≈ 0.25mm，上限 TRIM_PAD_MAX）。
+    let p = pad.min(TRIM_PAD_MAX);
+    let (p_l, p_t, p_r, p_b) = (p, p, p, p);
+    let top    = top.saturating_sub(p_t);
+    let left   = left.saturating_sub(p_l);
+    let bottom = (bottom + p_b).min(h - 1);
+    let right  = (right + p_r).min(w - 1);
 
-    let cw = right - left + 1;
-    let ch = bottom - top + 1;
-    let cropped = image::imageops::crop_imm(&rgba, left, top, cw, ch);
-    image::DynamicImage::from(cropped.to_image())
+    Some([left, top, right - left + 1, bottom - top + 1])
+}
+
+/// Trim white edges from an image.
+/// `threshold`: pixels where R, G, B are all >= threshold are considered "white".
+/// `pad`: 向外保留的边距（px，0–TRIM_PAD_MAX，前端「留边」配置项）
+/// Returns the cropped image plus its crop box
+/// (None when nothing was cropped — all-white image).
+/// 裁剪框供 PDF 直通路径做矢量裁切换算（见 trim_white_box）。
+pub fn trim_white_edges(img: &image::DynamicImage, threshold: u8, pad: u32) -> (image::DynamicImage, Option<TrimBox>) {
+    match trim_white_box(img, threshold, pad) {
+        Some([x, y, cw, ch]) => {
+            let rgba = img.to_rgba8();
+            let cropped = image::imageops::crop_imm(&rgba, x, y, cw, ch);
+            (image::DynamicImage::from(cropped.to_image()), Some([x, y, cw, ch]))
+        }
+        None => (img.clone(), None),
+    }
 }
 
 // =====================================================
@@ -3439,6 +3468,9 @@ pub struct RenderSettings {
     pub border_width: Option<f32>,
     pub border_color: Option<String>,
     pub trim_white: Option<bool>,
+    /// 裁剪后向外保留的边距（px，前端「留边」配置项；缺省 3，上限 60）
+    #[serde(default)]
+    pub trim_pad: Option<u32>,
     pub footer_text: Option<String>,
     pub footer_margin: f32,
     pub custom_fm: bool,
@@ -3492,6 +3524,10 @@ pub struct FileSpec {
     /// The frontend stores this as fileObj._pdfPageIdx.
     #[serde(default)]
     pub pdf_page_idx: Option<u32>,
+    /// 白边裁剪框 [x, y, w, h]，像素坐标、原点左上，基于该文件渲染出的位图（ow × oh）。
+    /// 仅在「裁剪白边」开启且检测到白边时由前端传入；PDF 直通路径用它做矢量裁切。
+    #[serde(default)]
+    pub trim_box: Option<TrimBox>,
 }
 
 /// A slot on a page — which file (if any) goes here, and its rotation.
@@ -4029,6 +4065,7 @@ fn decode_images(
     use rayon::prelude::*;
 
     let trim = settings.trim_white.unwrap_or(false);
+    let trim_pad = settings.trim_pad.unwrap_or(TRIM_PAD_DEFAULT).min(TRIM_PAD_MAX);
     let color_mode = settings.color_mode.clone();
 
     // Parallel decode — each file is independent
@@ -4112,8 +4149,9 @@ fn decode_images(
             }
 
             // Apply trim (global setting, not per-slot)
+            // 位图路径：裁剪直接烘焙进像素，不需要保留裁剪框
             if trim {
-                img = trim_white_edges(&img, 245);
+                img = trim_white_edges(&img, WHITE_THRESHOLD, trim_pad).0;
             }
 
             // Apply color mode (global setting, not per-slot)
@@ -4873,13 +4911,55 @@ fn merge_resource_dict(
     }
 }
 
+/// 把渲染位图的像素裁剪框换算成「旋转后显示坐标系」中的矩形（PDF 点，原点左下）。
+/// * `trim` — [x, y, w, h]，像素、原点左上，基于 `bmp_w × bmp_h` 的整页渲染位图
+/// * `eff_w` / `eff_h` — 页面旋转后的显示尺寸（PDF 点）
+///
+/// 返回 (x, y, w, h)；参数无效（空框 / 位图尺寸为 0）时返回 None。
+fn trim_box_to_crop_pt(
+    trim: TrimBox,
+    bmp_w: u32,
+    bmp_h: u32,
+    eff_w: f32,
+    eff_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let [x, y, cw_px, ch_px] = trim;
+    if bmp_w == 0 || bmp_h == 0 || cw_px == 0 || ch_px == 0 {
+        return None;
+    }
+    // 位图与页面显示尺寸应来自同一渲染，宽高比必须一致；
+    // 不一致说明位图并非该页的显示渲染（极端 /Rotate 等），换算不可信，退回整页避免错位。
+    let bmp_ratio = bmp_w as f32 / bmp_h as f32;
+    let eff_ratio = eff_w / eff_h;
+    if eff_ratio > 0.0 && ((bmp_ratio - eff_ratio) / eff_ratio).abs() > 0.02 {
+        log::warn!(
+            "trim_box_to_crop_pt: 位图宽高比 {:.4} 与页面显示宽高比 {:.4} 不一致，放弃矢量裁切",
+            bmp_ratio, eff_ratio
+        );
+        return None;
+    }
+    let sx = eff_w / bmp_w as f32;
+    let sy = eff_h / bmp_h as f32;
+    let cw = cw_px as f32 * sx;
+    let ch = ch_px as f32 * sy;
+    if cw <= 0.0 || ch <= 0.0 {
+        return None;
+    }
+    let cx = x as f32 * sx;
+    // 像素原点左上 → PDF 点原点左下
+    let cy = eff_h - (y + ch_px) as f32 * sy;
+    Some((cx, cy, cw, ch))
+}
+
 /// Extract a source PDF page as a Form XObject and register it in the output document.
-/// Returns (form_xobj_id, page_width_pt, page_height_pt).
+/// Returns (form_xobj_id, width_pt, height_pt) — 开启白边裁剪时返回裁剪后的尺寸。
 fn extract_page_as_form_xobject(
     source: &lopdf::Document,
     page_id: lopdf::ObjectId,
     mut output_doc: &mut lopdf::Document,
     id_map: &mut std::collections::HashMap<lopdf::ObjectId, lopdf::ObjectId>,
+    // 白边裁剪：(裁剪框像素, 位图宽px, 位图高px)。None = 嵌入整页。
+    trim: Option<(TrimBox, u32, u32)>,
 ) -> Result<(lopdf::ObjectId, f32, f32), String> {
     // 1. Get page content stream bytes (decompressed and concatenated)
     let content_bytes = source.get_page_content(page_id)
@@ -4901,6 +4981,21 @@ fn extract_page_as_form_xobject(
         (page_h_pt, page_w_pt)
     } else {
         (page_w_pt, page_h_pt)
+    };
+
+    // 3.5 白边裁剪：把渲染位图的像素裁剪框换算到「旋转后显示坐标系」（PDF 点，原点左下）。
+    // 位图是整页渲染的结果，尺寸 = effective 尺寸，故像素→点 用 effective/位图 比例。
+    let crop: Option<(f32, f32, f32, f32)> = trim.and_then(|(b, bmp_w, bmp_h)| {
+        let c = trim_box_to_crop_pt(b, bmp_w, bmp_h, effective_w, effective_h);
+        if let Some((cx, cy, cw, ch)) = c {
+            log::info!("extract_page_as_form_xobject: trim box={:?} bitmap={}x{} effective={:.1}x{:.1} → crop x={:.2} y={:.2} w={:.2} h={:.2}",
+                b, bmp_w, bmp_h, effective_w, effective_h, cx, cy, cw, ch);
+        }
+        c
+    });
+    let (bbox_w, bbox_h) = match crop {
+        Some((_, _, w, h)) => (w, h),
+        None => (effective_w, effective_h),
     };
 
     // 4. Build content stream with rotation + cropbox transforms prepended.
@@ -4940,6 +5035,19 @@ fn extract_page_as_form_xobject(
             format!("1 0 0 1 {:.4} {:.4} cm\n", -box_x1, -box_y1).as_bytes()
         );
     }
+
+    // 白边裁剪平移：把裁剪区左下角移到原点。
+    // 必须写在最后——cm 是左乘（CTM' = M × CTM），先写的先作用于点，
+    // 裁剪框取自旋转后的渲染位图，所以它要作用在旋转/CropBox 之后的显示坐标系里。
+    if let Some((cx, cy, _, _)) = crop {
+        prefix.extend_from_slice(
+            format!("1 0 0 1 {:.4} {:.4} cm\n", -cx, -cy).as_bytes()
+        );
+    }
+
+    // annotation 绘制需要复用同一套变换（/Rotate + CropBox + 裁剪平移）：
+    // prefix 的前两个字节是 "q\n"，其余即为纯变换指令
+    let prefix_transforms: Vec<u8> = prefix[2..].to_vec();
 
     // Close the graphics state after content
     let mut suffix = Vec::new();
@@ -5140,11 +5248,16 @@ fn extract_page_as_form_xobject(
                 let annot_name = format!("__Annot{}", annot_idx);
                 annot_xobjects.push((annot_name.clone().into_bytes(), ap_xobj_id));
 
-                // Drawing command: q <composed_matrix> /AnnotN Do Q
-                annot_draw_cmds.extend_from_slice(
-                    format!("q {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm /{} Do Q\n",
-                        cm_a, cm_b, cm_c, cm_d, cm_e, cm_f, annot_name).as_bytes()
-                );
+                // Drawing command: q <annot matrix> <prefix transforms> /AnnotN Do Q
+                // cm 是左乘累积（后写者在左 → 后作用于点）：先写 annot 的映射
+                // （AP 坐标 → 页面坐标），再写 prefix 变换，最终 CTM = prefix × annot
+                // —— AP 坐标先落到页面坐标，再经 /Rotate、CropBox 平移与白边裁剪
+                // 平移，和页面内容保持对齐。
+                let mut cmds = format!("q {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm ",
+                    cm_a, cm_b, cm_c, cm_d, cm_e, cm_f).into_bytes();
+                cmds.extend_from_slice(&prefix_transforms);
+                cmds.extend_from_slice(format!("/{} Do Q\n", annot_name).as_bytes());
+                annot_draw_cmds.extend_from_slice(&cmds);
 
                 log::info!("extract_page_as_form_xobject: annotation[{}] rect=[{:.1},{:.1},{:.1},{:.1}] bbox=[{:.1},{:.1},{:.1},{:.1}]",
                     annot_idx, rx1, ry1, rx2, ry2, bx1, by1, bx2, by2);
@@ -5162,6 +5275,8 @@ fn extract_page_as_form_xobject(
     // Annotation Rect coordinates are in the BBox coordinate system, so they
     // must be drawn AFTER the graphics state is restored — otherwise the CTM
     // scale would push the annotations far outside the BBox bounds.
+    // annotation 自带 prefix 变换 → 必须画在 Q 之后（CTM 已复位为 I），
+    // 否则 prefix 变换会被重复施加
     final_content.extend_from_slice(&suffix);
     final_content.extend_from_slice(&annot_draw_cmds);
 
@@ -5186,7 +5301,8 @@ fn extract_page_as_form_xobject(
         }
     }
 
-    // 7. Build Form XObject stream — BBox uses EFFECTIVE (post-rotation) dimensions.
+    // 7. Build Form XObject stream — BBox uses EFFECTIVE (post-rotation) dimensions,
+    // 或裁剪后的尺寸（白边裁剪时内容已被平移到原点，BBox 从 0 起）。
     let mut dict = lopdf::Dictionary::new();
     dict.set("Type", lopdf::Object::Name(b"XObject".to_vec()));
     dict.set("Subtype", lopdf::Object::Name(b"Form".to_vec()));
@@ -5194,8 +5310,8 @@ fn extract_page_as_form_xobject(
     dict.set("BBox", lopdf::Object::Array(vec![
         lopdf::Object::Real(0.0),
         lopdf::Object::Real(0.0),
-        lopdf::Object::Real(effective_w),
-        lopdf::Object::Real(effective_h),
+        lopdf::Object::Real(bbox_w),
+        lopdf::Object::Real(bbox_h),
     ]));
     dict.set("Resources", remapped_resources);
 
@@ -5208,7 +5324,7 @@ fn extract_page_as_form_xobject(
     let stream = lopdf::Stream::new(dict, final_content).with_compression(true);
     let xobj_id = output_doc.add_object(lopdf::Object::Stream(stream));
 
-    Ok((xobj_id, effective_w, effective_h))
+    Ok((xobj_id, bbox_w, bbox_h))
 }
 
 /// Per-slot adjustment data for passthrough rendering.
@@ -5284,14 +5400,17 @@ fn build_nup_content_stream(
 
         // Centered position in slot (bottom-left origin) based on visual dimensions.
         // 报销单模式：左上对齐（贴段内区域左上角）；常规模式：居中。
+        // 「裁剪白边」开启时垂直贴顶 —— 裁掉白边后内容居中会显出多余留白，
+        // 看起来像"白边没裁掉"；水平方向仍居中。
         let draw_w = vis_w * scale_x;
         let draw_h = vis_h * scale_y;
+        let top_align = settings.reimburse_mode || settings.trim_white.unwrap_or(false);
         let mut offset_x = slot.x_mm * MM_TO_PT;
-        let mut offset_y = if settings.reimburse_mode {
+        let mut offset_y = slot.y_mm * MM_TO_PT + if top_align {
             // bottom-up 坐标：顶部对齐 = slot 顶边 - 图像高度
-            slot.y_mm * MM_TO_PT + (slot_h_pt - draw_h)
+            slot_h_pt - draw_h
         } else {
-            slot.y_mm * MM_TO_PT + (slot_h_pt - draw_h) / 2.0
+            (slot_h_pt - draw_h) / 2.0
         };
         if !settings.reimburse_mode {
             offset_x += (slot_w_pt - draw_w) / 2.0;
@@ -5688,9 +5807,15 @@ fn generate_pdf_passthrough(
                     .copied()
                     .ok_or_else(|| format!("PDF页面{}不存在 (文件: {})", page_idx_in_pdf + 1, pdf_path))?;
 
-                // Extract as Form XObject (vector quality preserved)
+                // Extract as Form XObject (vector quality preserved).
+                // 白边裁剪开启时按前端传来的裁剪框做矢量裁切（整页 → 裁剪框）。
+                let trim = if request.settings.trim_white.unwrap_or(false) {
+                    file.trim_box.map(|b| (b, file.ow, file.oh))
+                } else {
+                    None
+                };
                 extract_page_as_form_xobject(
-                    source, source_page_id, &mut output_doc, id_map
+                    source, source_page_id, &mut output_doc, id_map, trim
                 )?
             } else {
                 // Image/OFD path → encode as FlateDecode (lossless) Image XObject
@@ -6484,3 +6609,4 @@ fn build_border_ops_lopdf(
 
     Some(lopdf::content::Content { operations: ops })
 }
+

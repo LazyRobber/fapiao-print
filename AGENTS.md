@@ -161,6 +161,7 @@ Rust generate_pdf_from_layout() — lopdf 直通管道 → 失败回退 printpdf
 
 **类型检测** `_detectInvoiceType()`（ocr.js）：ticket > toll > nontax > vat > ride > unknown。
 
+- 专票 / 普票：`_detectVatSubtype()`（仅 vat 路径判定）—— 票头标题区 `ny < 0.18` 优先、全文兜底；关键词 `普通发票|增值税普通|电子普通` → 普票、`专用发票|增值税专用` → 专票，**「普通」优先于「专用」**（票面其它位置的「专用」字样不致误判）；结果写回 `fileObj.invoiceType`（不覆盖已有结构化类型）
 - ticket：强标记（铁路电子客票/电子客票号）直判 + 弱信号 `_countTicketSignalGroups()` 13 组关键词 ≥2 组确认，防增值税票误判；`getTicketTypeLabel()` 细分标签
 - toll（通行费）：「通行费」强标记；「车牌号/车牌颜色+通行日期」弱标记双组确认；复用 VAT 提取链路（销售方=路桥公司），不走 ticket/nontax 早退分支；老式纸质票无价税合计时两段式金额兜底
 
@@ -176,7 +177,7 @@ Rust generate_pdf_from_layout() — lopdf 直通管道 → 失败回退 printpdf
 
 ### 导出与工具命令
 
-**汇总表**（侧边栏 📊）：14 字段按需勾选、双击编辑回写全 UI 同步、三金额合计行 sticky；`exportSummaryCsv()` UTF-8 BOM + CRLF 手写 CSV → `write_text_file`；数据源 `getCheckedFiles()`（不含 copies 展开）。内嵌批量重命名面板：3 预设模板 + 自定义字段（勾选顺序=文件名顺序）、`resolveNameConflicts()` 自动 `_2` 序号、`executeRename()` → `rename_file` 命令并同步 `S.files` 共享路径与 `_fileAdjMap`/`_notesMap` key；OFD 的 dedup key 排除 `_filePath`。
+**汇总表**（侧边栏 📊）：14 字段按需勾选、双击编辑回写全 UI 同步、三金额合计行 sticky；`exportSummaryCsv()` UTF-8 BOM + CRLF 手写 CSV → `write_text_file`；数据源 `getCheckedFiles()`（不含 copies 展开）。「发票类型」单一真源 `resolveInvoiceType(f)`（分类标记 通行费/车票/非税 → 结构化或 OCR 类型 → 兜底「发票」），`normalizeInvoiceType()` 归一为「专票 / 普票」短标签，列表徽章 / 复制发票信息 / 重命名 / CSV 共用同一口径；**禁止再写死「增值税发票」**（issue #35：普票全被显示成该串）。内嵌批量重命名面板：3 预设模板 + 自定义字段（勾选顺序=文件名顺序）、`resolveNameConflicts()` 自动 `_2` 序号、`executeRename()` → `rename_file` 命令并同步 `S.files` 共享路径与 `_fileAdjMap`/`_notesMap` key；OFD 的 dedup key 排除 `_filePath`。
 
 **文件命令**（均为 `async fn` + `spawn_blocking`）：`copy_file`、`rename_file`（同盘原子 rename，跨盘 copy+delete）。
 

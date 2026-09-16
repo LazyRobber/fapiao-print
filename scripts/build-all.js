@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 /**
  * 一键全量构建脚本 — 产出 4 个产物:
- *   1. 发票酱_x64-setup.exe          轻量版安装包 (NSIS)
- *   2. 发票酱_x64_绿色版.exe         轻量版绿色便携 (单文件 exe，无需 zip)
- *   3. 发票酱_x64_OCR版-setup.exe    OCR 版安装包 (NSIS)
- *   4. 发票酱_x64_OCR绿色版.zip      OCR 版绿色便携 (exe + models/)
+ *   1. TicketChan_2.6.4_x64-setup.exe          轻量版安装包 (NSIS)
+ *   2. TicketChan_2.6.4_x64_portable.exe       轻量版绿色便携 (单文件 exe，无需 zip)
+ *   3. TicketChan_2.6.4_x64_ocr-setup.exe      OCR 版安装包 (NSIS)
+ *   4. TicketChan_2.6.4_x64_ocr-portable.zip   OCR 版绿色便携 (exe + models/)
+ *
+ * 产物文件名一律使用 ASCII：GitHub Release 上传时会剥掉文件名里的非 ASCII
+ * 字符（中文变下划线），导致下载得到的文件名残缺。因此发布产物用英文名，
+ * 中文仅保留在程序自身的 productName 与 Release 页面的 label 中。
  *
  * 用法: node scripts/build-all.js
  *        npm run build:all
@@ -18,7 +22,8 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const pkg = require(path.join(ROOT, 'package.json'));
 const VERSION = pkg.version;
-const PRODUCT_NAME = '发票酱';
+const PRODUCT_NAME = '发票酱';               // 程序显示名（productName），仅用于日志
+const ARTIFACT_PREFIX = 'TicketChan';        // 发布产物文件名前缀（必须 ASCII）
 const EXE_NAME = 'ticketchan.exe';           // Cargo 编译出的二进制名
 const ARCH = 'x64';
 
@@ -27,12 +32,12 @@ const BUNDLE_NSIS = path.join(TARGET_RELEASE, 'bundle', 'nsis');
 const MODELS_SRC = path.join(ROOT, 'src-tauri', 'models');
 const DIST = path.join(ROOT, 'dist');
 
-// 最终产物文件名（统一放在 dist/ 根目录）
+// 最终产物文件名（统一放在 dist/ 根目录，全 ASCII）
 const FINAL_FILES = {
-  lwInstaller:  `${PRODUCT_NAME}_${VERSION}_${ARCH}-setup.exe`,
-  lwPortable:   `${PRODUCT_NAME}_${VERSION}_${ARCH}_绿色版.exe`,
-  ocrInstaller: `${PRODUCT_NAME}_${VERSION}_${ARCH}_OCR版-setup.exe`,
-  ocrPortable:  `${PRODUCT_NAME}_${VERSION}_${ARCH}_OCR绿色版.zip`,
+  lwInstaller:  `${ARTIFACT_PREFIX}_${VERSION}_${ARCH}-setup.exe`,
+  lwPortable:   `${ARTIFACT_PREFIX}_${VERSION}_${ARCH}_portable.exe`,
+  ocrInstaller: `${ARTIFACT_PREFIX}_${VERSION}_${ARCH}_ocr-setup.exe`,
+  ocrPortable:  `${ARTIFACT_PREFIX}_${VERSION}_${ARCH}_ocr-portable.zip`,
 };
 
 // ─── 工具函数 ───────────────────────────────────────
@@ -89,13 +94,7 @@ function findNsisInstaller(label) {
     }
   }
   const fullPath = path.join(BUNDLE_NSIS, found);
-  // 如果文件名不含中文（CI 编码问题），提示用户
-  if (!found.includes(PRODUCT_NAME)) {
-    console.log(`  ⚠ NSIS 产物文件名含中文丢失: ${found}`);
-    console.log(`  → 将重命名为: ${FINAL_FILES[label]}`);
-  } else {
-    console.log(`  ✓ 找到 ${label} 安装包: ${found} (${sizeMB(fullPath)} MB)`);
-  }
+  console.log(`  ✓ 找到 ${label} 安装包: ${found} (${sizeMB(fullPath)} MB)`);
   return fullPath;
 }
 
@@ -125,8 +124,8 @@ function verifyModels() {
 
 /**
  * 用 PowerShell Compress-Archive 创建 zip
- * 内部目录名使用 ASCII 安全名（避免 CI 编码问题），zip 文件名使用中文
- * @param {string} zipPath       输出 zip 路径（中文文件名）
+ * 内部目录名使用 ASCII 安全名，避免解压端编码差异导致目录名乱码
+ * @param {string} zipPath       输出 zip 路径
  * @param {string[]} items       要打包的文件/目录路径
  * @param {string} innerDirName  zip 内一级目录名（ASCII 安全）
  */
@@ -238,7 +237,7 @@ async function main() {
   createZip(
     path.join(DIST, FINAL_FILES.ocrPortable),
     [ocrExeCopy, MODELS_SRC],
-    `${PRODUCT_NAME}_${VERSION}_OCR绿色版`
+    `${ARTIFACT_PREFIX}_${VERSION}_OCR`
   );
 
   // 清理 staging

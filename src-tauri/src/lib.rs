@@ -426,6 +426,21 @@ fn compare_versions(a: &str, b: &str) -> i32 {
     0
 }
 
+/// 构建带 TLS 的 ureq agent（统一超时配置）。
+///
+/// ⚠️ ureq 2.12 的 `native-tls` feature **不会**自动成为默认 TLS 后端：
+/// 未启用 `tls`(rustls) feature 时 `default_tls_config()` 返回一个直接报错的桩，
+/// 所有 https 请求都会以 "cannot make HTTPS request because no TLS backend is configured" 失败。
+/// 必须显式注入连接器，才能用系统 schannel 走 https。
+fn build_http_agent(timeout: std::time::Duration) -> Result<ureq::Agent, String> {
+    let tls = ureq::native_tls::TlsConnector::new()
+        .map_err(|e| format!("初始化 TLS 失败: {}", e))?;
+    Ok(ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .tls_connector(std::sync::Arc::new(tls))
+        .build())
+}
+
 /// Check for updates by querying GitHub Releases API (latest release).
 /// Returns update info including latest version, release notes, and download assets.
 /// Uses blocking ureq offloaded to the blocking thread pool.
@@ -437,9 +452,7 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<UpdateInfo, String> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(15))
-            .build();
+        let agent = build_http_agent(std::time::Duration::from_secs(15))?;
 
         // 主备双源: 直连 → gh-proxy.com 代理
         let urls = [
@@ -935,9 +948,7 @@ async fn download_pdfium_dll(app: tauri::AppHandle) -> Result<pdf_engine::PdfRes
     tauri::async_runtime::spawn_blocking(move || -> Result<pdf_engine::PdfResult, String> {
         use std::io::{Read, Write};
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(120))
-            .build();
+        let agent = build_http_agent(std::time::Duration::from_secs(120))?;
 
         let resp = match agent.get(dll_url).call() {
             Ok(r) => r,
@@ -1086,9 +1097,7 @@ async fn download_sumatrapdf(app: tauri::AppHandle) -> Result<pdf_engine::PdfRes
     tauri::async_runtime::spawn_blocking(move || -> Result<pdf_engine::PdfResult, String> {
         use std::io::{Read, Write};
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(120))
-            .build();
+        let agent = build_http_agent(std::time::Duration::from_secs(120))?;
 
         let resp = match agent.get(zip_url).call() {
             Ok(r) => r,

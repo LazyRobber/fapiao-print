@@ -590,7 +590,7 @@ async function openFileDialog() {
         options: {
           multiple: true,
           title: '选择发票文件',
-          filters: [{ name: '发票文件', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif', 'ofd', 'xml'] }]
+          filters: [{ name: '发票文件', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'bmp', 'ofd', 'xml'] }]
         }
       });
       if (!result) return [];
@@ -1467,24 +1467,24 @@ function updateFileItem(fileObj) {
       var gdupb = f._dup ? '<span class="dup-badge" title="检测到重复发票">\u26A0</span>' : '';
       cardMetaEl.innerHTML = pd + ab + cb + rb + gdupb + '<span class="card-size" title="文件大小">' + fmtSize(f.size) + '</span>';
     }
-    var gsellerHtml = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : f._isToll ? 'toll-badge' : 'seller-badge') + '">' + escHtml(f.sellerName) + '</span>' : '';
+    var gsellerInner = sellerRowHtml(f, false);
     var sellerLine = items[idx].querySelector('.card-seller');
     if (sellerLine) {
-      sellerLine.innerHTML = gsellerHtml;
+      sellerLine.innerHTML = gsellerInner;
       sellerLine.title = f.sellerName || '';
-      sellerLine.style.display = gsellerHtml ? '' : 'none';
-    } else if (gsellerHtml) {
+      sellerLine.style.display = gsellerInner ? '' : 'none';
+    } else if (gsellerInner) {
       var cardNameEl = items[idx].querySelector('.card-name');
       if (cardNameEl && cardNameEl.parentElement) {
         var newSellerLine = document.createElement('div');
         newSellerLine.className = 'card-seller';
         newSellerLine.title = f.sellerName || '';
-        newSellerLine.innerHTML = gsellerHtml;
+        newSellerLine.innerHTML = gsellerInner;
         cardNameEl.parentElement.insertBefore(newSellerLine, cardNameEl.nextSibling);
       }
     }
   } else {
-    var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : f._isToll ? 'toll-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
+    var sellerInner = sellerRowHtml(f, true);
     // 只更新 .file-meta-left，保留 file-meta-right 操作按钮与布局结构
     var leftEl = items[idx].querySelector('.file-meta-left');
     if (leftEl) {
@@ -1493,17 +1493,17 @@ function updateFileItem(fileObj) {
     }
     var sellerEl = items[idx].querySelector('.file-seller');
     if (sellerEl) {
-      sellerEl.innerHTML = sb;
+      sellerEl.innerHTML = sellerInner;
       sellerEl.title = f.sellerName || '';
-      sellerEl.style.display = sb ? '' : 'none';
-    } else if (sb) {
+      sellerEl.style.display = sellerInner ? '' : 'none';
+    } else if (sellerInner) {
       // .file-seller didn't exist at render time (no sellerName yet), insert it now
       var nameEl = items[idx].querySelector('.file-name');
       if (nameEl && nameEl.parentElement) {
         var newSeller = document.createElement('div');
         newSeller.className = 'file-seller';
         newSeller.title = f.sellerName || '';
-        newSeller.innerHTML = sb;
+        newSeller.innerHTML = sellerInner;
         nameEl.parentElement.insertBefore(newSeller, nameEl.nextSibling);
       }
     }
@@ -1844,7 +1844,7 @@ function loadFileFast(file) {
       toast('PDF 格式请使用桌面版打开');
       resolve(null);
     }
-    else if (['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'].indexOf(ext) >= 0) {
+    else if (['jpg', 'jpeg', 'png', 'bmp'].indexOf(ext) >= 0) {
       var reader = new FileReader();
       reader.onload = async function(e) {
         var img = new Image(); img.src = e.target.result;
@@ -1877,8 +1877,68 @@ function loadFileFast(file) {
 // =====================================================
 // File list management
 // =====================================================
-var TYPE_FILTER_LABELS = { vat: '发票', ticket: '车票', toll: '通行费', nontax: '财政' };
+var TYPE_FILTER_LABELS = { special: '专票', plain: '普票', ticket: '车票', toll: '通行费', nontax: '非税', other: '其他' };
 var FORMAT_FILTER_LABELS = { pdf: 'PDF', ofd: 'OFD', image: '图片', xml: 'XML' };
+
+// 发票类型归一化：把各来源的原始类型串收敛成可比较的短标签
+// 「电子发票(普通发票)」「增值税普通发票」「普通发票」→ 普票；含「专用」→ 专票；
+// 含「非税」→ 非税票据（XML/OFD 财政票据的 invoiceType 直读，无 OCR 文本可用）
+function normalizeInvoiceType(raw) {
+  if (!raw) return '';
+  var s = String(raw).replace(/\s/g, '');
+  if (s.indexOf('专用') >= 0) return '专票';
+  if (s.indexOf('普通') >= 0) return '普票';
+  if (s.indexOf('非税') >= 0) return '非税票据';
+  return s;
+}
+
+// 「发票类型」单一真源：分类标记（通行费 / 车票 / 非税票据）优先，其次结构化类型
+// （XML / OFD 解析、OCR 识别结果），最后兜底「发票」。
+// 分类标记优先是必须的：通行费发票、车票也有专普属性，但它们按类别单独排版，
+// 若让专普信息抢先，通行费发票会从「通行费发票」退化成「普票」。
+// 不再写死「增值税发票」—— 那会让普通发票在汇总表里看起来像专票（issue #35）
+function resolveInvoiceType(f) {
+  if (!f) return '';
+  if (f._isToll) return '通行费发票';
+  if (f._isTicket) return f.sellerName || '车票'; // sellerName 存车票标签
+  if (f._ocrText && /非税/.test(f._ocrText)) return '非税票据';
+  if (f.invoiceType) return normalizeInvoiceType(f.invoiceType);
+  return '发票';
+}
+
+// 统一票种 chip：所有发票类型共用同一形状、按类型配色
+// （专票金 / 普票灰 / 通行费青 / 车票蓝 / 非税紫）；无类型信息（兜底「发票」）
+// 与无法归类的原始串（如「电子发票」）不渲染。缩略图徽章仍留给文件格式
+function typeChipHtml(f) {
+  var t = resolveInvoiceType(f);
+  if (!t || t === '发票') return '';
+  var cls = '', label = t, raw = '';
+  if (t === '专票') { cls = ' special'; raw = f.invoiceType || ''; }
+  else if (t === '普票') { raw = f.invoiceType || ''; }
+  else if (t === '通行费发票') { cls = ' toll'; label = '通行费'; raw = f.invoiceType || ''; }
+  else if (t === '非税票据') { cls = ' nontax'; label = '非税'; }
+  else if (f._isTicket) { cls = ' ticket'; } // 车票：sellerName 存标签全文
+  else return '';
+  return '<span class="vat-badge' + cls + '" title="识别到的票种：' + escHtml(raw || t) + '">' + escHtml(label) + '</span>';
+}
+
+// 销售方徽章：恒为灰色（类型信息全部由票种 chip 表达，不再靠变色）；
+// 车票不渲染——其 sellerName 存的是车票标签，由票种 chip 展示
+function sellerBadgeHtml(f, withTaxId) {
+  if (!f.sellerName || f._isTicket) return '';
+  var title = withTaxId ? ' title="' + escHtml(f.sellerCreditCode || f.sellerName) + '"' : '';
+  return '<span class="seller-badge"' + title + '>' + escHtml(f.sellerName) + '</span>';
+}
+
+// 列表项销售方行内容 = 票种 chip + 销售方徽章（两者皆空返回空串，整行不渲染）
+function sellerRowHtml(f, withTaxId) {
+  return typeChipHtml(f) + sellerBadgeHtml(f, withTaxId);
+}
+
+// 文件格式标签：jpeg 统一显示 jpg（缩略图徽章用）
+function fileFormatLabel(f) {
+  return f.type === 'jpeg' ? 'jpg' : String(f.type || '');
+}
 
 // 筛选区折叠：默认收起节省侧边栏垂直空间，摘要行仍实时反映激活的筛选
 function toggleFilterPanel() {
@@ -1963,13 +2023,21 @@ function syncTypeFilterButtons() {
   });
 }
 
+// 与票种 chip 共用 resolveInvoiceType 单一真源：非税/专票/普票对 XML/OFD/PDF 文字层
+// 等非 OCR 来源同样生效；车票/通行费直判分类标记（resolve 对车票返回的是标签全文）。
+// 「其他」= 列表上不渲染票种 chip 的文件（完全未识别 + 识别了但无法归专普的粗粒度串）
 function isTypeMatch(f) {
   switch (S.typeFilter) {
     case 'ticket': return !!f._isTicket;
     case 'toll': return !!f._isToll;
-    case 'nontax': return !!f._isNonTax;
-    case 'vat': return !f._isTicket && !f._isToll && !f._isNonTax;
-    default: return true;
+    case 'nontax': return resolveInvoiceType(f) === '非税票据';
+    case 'special': return resolveInvoiceType(f) === '专票';
+    case 'plain': return resolveInvoiceType(f) === '普票';
+    case 'other':
+      if (f._isTicket || f._isToll) return false;
+      var t = resolveInvoiceType(f);
+      return t !== '专票' && t !== '普票' && t !== '非税票据';
+    default: return true; // 旧配置残留的 'vat' 等未知值按全部处理
   }
 }
 
@@ -2172,9 +2240,10 @@ function renderFileList() {
       var gab = buildAmtBadge(f);
       var gpd = f._printed ? '<span class="printed-dot" title="已打印">✓</span>' : '';
       var gsize = '<span class="card-size" title="文件大小">' + fmtSize(f.size) + '</span>';
-      var gseller = f.sellerName ? '<div class="card-seller" title="' + escHtml(f.sellerName) + '"><span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : f._isToll ? 'toll-badge' : 'seller-badge') + '">' + escHtml(f.sellerName) + '</span></div>' : '';
+      var gsellerInner = sellerRowHtml(f, false);
+      var gseller = gsellerInner ? '<div class="card-seller"' + (f.sellerName ? ' title="' + escHtml(f.sellerName) + '"' : '') + '>' + gsellerInner + '</div>' : '';
       var gthumb = f._loading ? '' : (f.previewUrl ? '<img src="' + escHtml(f.previewUrl) + '">' : (f._xmlInvoice ? '<div class="xml-placeholder"><span class="xml-icon">XML</span>' + (f.invoiceNo ? '<span class="xml-no">' + escHtml(f.invoiceNo.slice(-4)) + '</span>' : '') + '</div>' : '\uD83D\uDCC4'));
-      var gtype = f._xmlInvoice && f.invoiceType ? escHtml(f.invoiceType.replace(/^[^(]*\(/, '').replace(/\)$/, '') || f.invoiceType) : (f.type === 'jpeg' ? 'jpg' : escHtml(f.type));
+      var gtype = f.type === 'jpeg' ? 'jpg' : escHtml(f.type);
       var gacts = '';
       if (!f._loading) {
         gacts = '<button class="ib card-ib' + (i === 0 ? ' disabled' : '') + '" onclick="moveFile(' + i + ',-1)" title="上移">\u25B2</button>' +
@@ -2211,12 +2280,12 @@ function renderFileList() {
     var rb = f.rotation ? '<span class="rot-badge">' + f.rotation + '°</span>' : '';
     var dupb = f._dup ? '<span class="dup-badge" title="检测到重复发票：点击左上角「重复」筛选可一键勾选删除">⚠重复</span>' : '';
     var ab = buildAmtBadge(f);
-    var sb = f.sellerName ? '<span class="' + (f._isTicket ? 'ticket-badge' : f._isNonTax ? 'nontax-badge' : f._isToll ? 'toll-badge' : 'seller-badge') + '" title="' + escHtml(f.sellerCreditCode || f.sellerName) + '">' + escHtml(f.sellerName) + '</span>' : '';
+    var sellerInner = sellerRowHtml(f, true);
+    var sellerRow = sellerInner ? '<div class="file-seller"' + (f.sellerName ? ' title="' + escHtml(f.sellerName) + '"' : '') + '>' + sellerInner + '</div>' : '';
     // XSS FIX: escHtml(f.name) in both title and display text
     // XSS FIX: escHtml(f.previewUrl) in img src, escHtml(f.type) in type-badge
     var safePreviewUrl = escHtml(f.previewUrl || '');
-    var safeType = escHtml(f.type === 'jpeg' ? 'jpg' : f.type);
-    var typeBadgeText = f._xmlInvoice && f.invoiceType ? escHtml(f.invoiceType.replace(/^[^(]*\(/, '').replace(/\)$/, '') || f.invoiceType) : safeType;
+    var typeBadgeText = f.type === 'jpeg' ? 'jpg' : escHtml(f.type);
     var thumbContent = f._loading ? '' : (f.previewUrl ? '<img src="' + safePreviewUrl + '">' : (f._xmlInvoice ? '<div class="xml-placeholder"><span class="xml-icon">XML</span>' + (f.invoiceNo ? '<span class="xml-no">' + escHtml(f.invoiceNo.slice(-4)) + '</span>' : '') + '</div>' : '\uD83D\uDCC4'));
     var ocrBtnHtml = hasOcr && canOcrFile(f)
       ? (f._ocrPending
@@ -2235,7 +2304,7 @@ function renderFileList() {
     return '<div class="' + cls + '" data-idx="' + i + '"' + hideStyle + ' onclick="clickFileItem(' + i + ',event)" ondblclick="openInvModal(' + i + ')">' +
       '<div class="file-check ' + (f.checked ? 'checked' : '') + '" onclick="togCheck(' + i + ')"></div>' +
       '<div class="file-thumb">' + thumbContent + '<div class="type-badge">' + typeBadgeText + '</div></div>' +
-      '<div class="file-info"><div class="file-name" title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</div>' + (sb ? '<div class="file-seller" title="' + escHtml(f.sellerName) + '">' + sb + '</div>' : '') + '<div class="file-meta">' + metaActions + '</div></div>' +
+      '<div class="file-info"><div class="file-name" title="' + escHtml(f.name) + '">' + escHtml(f.name) + '</div>' + sellerRow + '<div class="file-meta">' + metaActions + '</div></div>' +
     '</div>';
   }).join('');
 
@@ -2390,7 +2459,7 @@ function ctxCopyInfo() {
   function add(label, val) {
     if (val !== undefined && val !== null && String(val).trim() !== '') lines.push(label + '：' + String(val).trim());
   }
-  add('发票类型', f.invoiceType);
+  add('发票类型', normalizeInvoiceType(f.invoiceType));
   add('发票号码', f.invoiceNo);
   add('开票日期', f.invoiceDate);
   add('购买方', f.buyerName);
@@ -2824,8 +2893,16 @@ function openInvModal(i) {
   var _fwm = _fw + ';font-family:monospace';
   var mRF = function(label, html) { return '<div class="modal-row"><label class="modal-lbl">' + label + '</label><div class="modal-ctrl end">' + html + '</div></div>'; };
   var mRA = function(label, html) { return '<div class="modal-row"><label class="modal-lbl">' + label + '</label><div class="modal-ctrl">' + html + '</div></div>'; };
+  // 顶部信息条：文件名 + 统一票种 chip + 状态标记 + 格式/大小（类型明细悬停 chip 可见，不再单设一行）
+  var headMarks = (f._printed ? '<span style="font-size:11px;color:var(--success);flex-shrink:0">✓ 已打印</span>' : '') +
+                  (f._dup ? '<span style="font-size:11px;color:var(--danger);flex-shrink:0">⚠ 重复</span>' : '');
+  var headMeta = escHtml(fileFormatLabel(f).toUpperCase()) + ' · ' + fmtSize(f.size);
   document.getElementById('invModalBody').innerHTML =
-    '<div style="font-size:13px;padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:10px">\uD83D\uDCC4 ' + escHtml(f.name) + '</div>' +
+    '<div style="font-size:13px;padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:10px;display:flex;align-items:center;gap:6px">' +
+      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(f.name) + '">\uD83D\uDCC4 ' + escHtml(f.name) + '</span>' +
+      typeChipHtml(f) + headMarks +
+      '<span style="font-size:11px;color:var(--text-muted);flex-shrink:0">' + headMeta + '</span>' +
+    '</div>' +
     mRF('排版份数', '<button class="btn btn-sm btn-icon" onclick="changeModalCopies(-1)">\u2212</button><input type="number" id="mCopies" value="' + f.copies + '" min="1" max="99" style="width:52px;text-align:center;flex:none"><button class="btn btn-sm btn-icon" onclick="changeModalCopies(1)">+</button>') +
     '<div style="font-size:10px;color:var(--text-muted);margin:-6px 0 8px 76px">同一发票在布局中占几个位置</div>' +
     mRF('含税价', '<span style="font-size:14px;font-weight:600;color:var(--success);flex-shrink:0">\u00A5</span><input type="number" id="mAmountTax" value="' + (f.amountTax || '') + '" min="0" step="0.01" placeholder="0.00" style="' + _fw + '">') +
@@ -2837,6 +2914,7 @@ function openInvModal(i) {
     mRA('购方代码', '<input type="text" id="mBuyerCreditCode" value="' + escHtml(f.buyerCreditCode || '') + '" placeholder="自动识别" class="mono-input">') +
     mRA('销售方', '<input type="text" id="mSeller" value="' + escHtml(f.sellerName || '') + '" placeholder="自动识别">') +
     mRA('信用代码', '<input type="text" id="mCreditCode" value="' + escHtml(f.sellerCreditCode || '') + '" placeholder="自动识别" class="mono-input">') +
+    mRA('备注', '<input type="text" id="mNote" value="' + escHtml(f.note || '') + '" placeholder="手动备注（汇总表同步）">') +
     mRF('旋转', '<select id="mRot" style="width:140px;flex:none"><option value="0" ' + (f.rotation === 0 ? 'selected' : '') + '>不旋转</option><option value="90" ' + (f.rotation === 90 ? 'selected' : '') + '>90\u00B0</option><option value="180" ' + (f.rotation === 180 ? 'selected' : '') + '>180\u00B0</option><option value="270" ' + (f.rotation === 270 ? 'selected' : '') + '>270\u00B0</option></select>') +
     '<div style="border-top:1px dashed var(--border);margin-top:4px;padding-top:8px">' +
     '<div style="font-size:11px;font-weight:700;color:var(--text-secondary);margin-bottom:6px">🎯 单票调整</div>' +
@@ -2867,6 +2945,7 @@ function confirmInvModal() {
   f.invoiceDate = document.getElementById('mInvoiceDate').value;
   f.buyerName = document.getElementById('mBuyer').value;
   f.buyerCreditCode = document.getElementById('mBuyerCreditCode').value;
+  f.note = document.getElementById('mNote').value;
   // Per-slot adjustments
   f.slotScale = Math.max(0.2, Math.min(3.0, (parseInt(document.getElementById('mSlotScale').value) || 100) / 100));
   f.slotOffsetX = parseFloat(document.getElementById('mSlotOffX').value) || 0;
@@ -3045,7 +3124,7 @@ function applySlotAdjToAll() {
 // =====================================================
 // Text Enhancement — 浅色/模糊图片发票增强（Rust 全分辨率处理）
 // =====================================================
-var ENHANCE_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'];
+var ENHANCE_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'bmp'];
 
 /** 仅图片文件（有磁盘路径，走 Rust 原图处理）可增强；PDF/OFD/XML 不支持 */
 function canEnhanceFile(f) {
@@ -4818,11 +4897,7 @@ function getSummaryCellValue(fileObj, field, idx) {
   switch (field.key) {
     case 'seq': return String(idx + 1);
     case 'invoiceType':
-      if (fileObj._xmlInvoice && fileObj.invoiceType) return fileObj.invoiceType;
-      if (fileObj._isToll) return '通行费发票';
-      if (fileObj._isTicket) return fileObj.sellerName || '车票'; // sellerName holds ticket label
-      if (fileObj._ocrText && /非税/.test(fileObj._ocrText)) return '非税票据';
-      return '增值税发票';
+      return resolveInvoiceType(fileObj);
     case 'amountTax': return fileObj.amountTax > 0 ? fileObj.amountTax.toFixed(2) : '';
     case 'amountNoTax': return fileObj.amountNoTax > 0 ? fileObj.amountNoTax.toFixed(2) : '';
     case 'taxAmount': return fileObj.taxAmount > 0 ? fileObj.taxAmount.toFixed(2) : '';

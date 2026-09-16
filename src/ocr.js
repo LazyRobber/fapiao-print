@@ -402,6 +402,7 @@ function applyOcrResult(fileObj, ocrResult) {
     fileObj._isTicket = info.isTicket || false;
     fileObj._isNonTax = info.isNonTax || false;
     fileObj._isToll = info.isToll || false;
+    if (info.invoiceType && !fileObj.invoiceType) fileObj.invoiceType = info.invoiceType;
 
     // If amounts already set by PDF text extraction, skip OCR amount validation
     // to avoid duplicate warning logs
@@ -551,6 +552,7 @@ function applyPdfTextResult(fileObj, pdfTextResult) {
     fileObj._isTicket = info.isTicket || false;
     fileObj._isNonTax = info.isNonTax || false;
     fileObj._isToll = info.isToll || false;
+    if (info.invoiceType && !fileObj.invoiceType) fileObj.invoiceType = info.invoiceType;
 
     // Only fill empty fields — structured extraction priority
     if (info.invoiceNo && !fileObj.invoiceNo) fileObj.invoiceNo = info.invoiceNo;
@@ -794,6 +796,22 @@ function _cleanName(raw) {
   // Must contain CJK and be at least 2 chars
   if (name.length < 2 || !/[\u4e00-\u9fff]/.test(name)) return '';
   return name;
+}
+
+/**
+ * 坐标法与跨行法结果择优：
+ * - 坐标值含冒号 → 标签残留（脏值），用跨行候选；
+ * - 两值互为子串 → 坐标法截断/丢字，取更长的跨行候选；
+ * - 其余（同名/完全不同名）保持坐标值 —— 跨行在乱序文本上可能配错侧，不盲目覆盖。
+ */
+function _betterCoordName(coord, cross) {
+  if (!coord) return cross || '';
+  if (!cross) return coord;
+  if (/[:：]/.test(coord)) return cross;
+  if (coord !== cross && (cross.indexOf(coord) >= 0 || coord.indexOf(cross) >= 0)) {
+    return cross.length > coord.length ? cross : coord;
+  }
+  return coord;
 }
 
 /**
@@ -1678,6 +1696,11 @@ function _extractByText(fullText, words) {
   }
 
   // --- Buyer/Seller names ---
+  // Priority 0: Cross-line candidates（文本顺序，对拆字 PDF 稳定）。
+  // 坐标邻近提取在拆字 PDF 上用近似宽度取值，易截断/混入标签冒号，
+  // 先预跑跨行候选，坐标法跑完后做合成（见 _betterCoordName）。
+  var crossNames = {};
+  _extractNamesCrossLine(text, crossNames);
   // Priority 1: Explicit labels "购买方名称：" / "销售方名称：" (same line)
   // Also handles non-tax invoices: "交款人：" for buyer
   var buyerLabelMatch = text.match(/(?:购\s*买\s*方(?:信息)?名\s*称|交\s*款\s*人\s*[:：])\s*([^\n]+)/);
@@ -1695,6 +1718,10 @@ function _extractByText(fullText, words) {
   if ((!result.buyerName || !result.sellerName) && words && words.length > 0) {
     _extractNamesByCoords(words, result);
   }
+  // 合成：坐标法残缺值（标签冒号残留 / 截断成跨行候选的子串）用跨行候选修复；
+  // 干净的坐标值保持不变（跨行在乱序文本上可能配错侧，不盲目覆盖）
+  result.buyerName = _betterCoordName(result.buyerName, crossNames.buyerName);
+  result.sellerName = _betterCoordName(result.sellerName, crossNames.sellerName);
   // Priority 1c: Cross-line format (label and value on separate lines)
   // Only if coordinate method didn't find both names
   if (!result.buyerName || !result.sellerName) {
@@ -2752,6 +2779,26 @@ function _detectInvoiceType(words, imgW, imgH) {
 }
 
 /**
+ * 增值税发票 专票/普票 判定。
+ * 三层兜底：票头标题区（ny < 0.18）→ 全文原始串（内容流顺序，标题连续）→ 词序拼接。
+ * 「普通」优先于「专用」——票面其它位置出现「专用」字样或识别噪声时，不会把普票误判成专票。
+ * fullText 必传：部分 PDF 的文字层坐标失效（整页并成一行、词按 x 重排），
+ * 按 words 拼接会把连续标题打散，只有内容流顺序的原始串能保住连续关键词。
+ * @returns {'专票'|'普票'|''}
+ */
+function _detectVatSubtype(words, fullText) {
+  function pick(text) {
+    var s = (text || '').replace(/\s/g, '');
+    if (/普通发票|增值税普通|电子普通/.test(s)) return '普票';
+    if (/专用发票|增值税专用/.test(s)) return '专票';
+    return '';
+  }
+  var head = words.filter(function(w) { return w.ny < 0.18; })
+    .map(function(w) { return w.normText; }).join('');
+  return pick(head) || pick(fullText) || pick(words.map(function(w) { return w.normText; }).join(''));
+}
+
+/**
  * Extract seller info using coordinates.
  * Strategy: find "销售方信息" or "名称:" in right half → grab name + credit code.
  */
@@ -2956,13 +3003,16 @@ function extractByCoordinates(ocrResult) {
 
   // Detect invoice type
   var invType = _detectInvoiceType(words, imgW, imgH);
+  // 专票/普票仅在增值税发票路径下判定（车票/通行费/非税各走自己的类型标记）
+  var vatSubtype = invType === 'vat' ? _detectVatSubtype(words, fullText) : '';
   var isTicket = invType === 'ticket';
   var isToll = invType === 'toll';
   var sellerName = textInfo.sellerName || '';
   var sellerCreditCode = textInfo.sellerCreditCode || '';
   var amountTax = 0, amountNoTax = 0, taxAmount = 0;
 
-  console.log('[坐标提取] 发票类型:', invType, '字数:', fullText.length, '词数:', words.length,
+  console.log('[坐标提取] 发票类型:', invType + (vatSubtype ? '/' + vatSubtype : ''),
+    '字数:', fullText.length, '词数:', words.length,
     '文本提取:', { invoiceNo: invoiceNo || '(空)', invoiceDate: invoiceDate || '(空)',
     buyerName: buyerName || '(空)', sellerName: sellerName || '(空)' });
 
@@ -3829,6 +3879,7 @@ function extractByCoordinates(ocrResult) {
            sellerName: sellerName, sellerCreditCode: sellerCreditCode,
            invoiceNo: invoiceNo, invoiceDate: invoiceDate,
            buyerName: buyerName, buyerCreditCode: buyerCreditCode,
+           invoiceType: vatSubtype,
            _ocrText: fullText, isTicket: false, isNonTax: false, isToll: isToll };
 }
 

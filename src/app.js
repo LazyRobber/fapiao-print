@@ -2560,6 +2560,7 @@ function rotateSelected() {
   var i = S.files.indexOf(f);
   if (i < 0) return;
   rotFile(i);
+  syncSlotToolbar();
 }
 // OCR 仅对图像与 PDF 有意义；XML/OFD 为结构化数据，字段直接解析，无需 OCR（用户要求禁用入口）
 function canOcrFile(f) {
@@ -3037,6 +3038,12 @@ function syncSlotToolbar() {
   if (top < wrap.scrollTop + 2) top = slotTop + 4; // 槽位贴视口顶部时放票面内侧
   tb.style.left = Math.round(left) + 'px';
   tb.style.top = Math.round(top) + 'px';
+  var rotBtn = document.getElementById('slotRotateBtn');
+  if (rotBtn) {
+    var rot = f.rotation || 0;
+    rotBtn.textContent = '↻ ' + (rot ? rot + '°' : '旋转');
+    rotBtn.title = '旋转此票 90°（顺时针），当前 ' + rot + '°';
+  }
   tb.classList.remove('hidden');
 }
 document.getElementById('previewWrap').addEventListener('scroll', syncSlotToolbar);

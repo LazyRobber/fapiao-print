@@ -373,10 +373,6 @@
         </div>
         <button class="btn btn-sm btn-icon" onclick="changeZoom(5)" title="放大 (Ctrl++)" style="font-size:16px;font-weight:700">+</button>
       </div>
-      <div class="toolbar-sep"></div>
-      <div class="toolbar-group">
-        <button class="btn btn-sm btn-icon" onclick="rotateSelected()" title="旋转选中发票 90°" style="font-size:16px">↻</button>
-      </div>
       <div style="flex:1"></div>
       <div class="toolbar-group">
         <button class="btn btn-sm" onclick="savePdf()" title="保存为PDF">📥 PDF</button>
@@ -397,6 +393,7 @@
         <button class="btn btn-sm" onclick="resetSlotAdj()" title="重置此票的缩放与偏移">↩ 重置</button>
         <button class="btn btn-sm" onclick="setSlotAlignment('center','center')" title="票面居中">⊙ 居中</button>
         <button class="btn btn-sm" onclick="applySlotAdjToAll()" title="将此票的调整应用到全部发票">⧉ 应用到全部</button>
+        <button class="btn btn-sm" id="slotRotateBtn" onclick="rotateSelected()" title="旋转此票 90°（顺时针）">↻ 旋转</button>
       </div>
     </div>
 

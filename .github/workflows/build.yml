@@ -72,59 +72,41 @@ jobs:
         run: |
           Write-Host "`n=== 验证构建产物 ==="
           $dist = "dist"
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+
+          # 产物文件名必须全 ASCII：GitHub Release 上传会剥掉非 ASCII 字符，
+          # 导致下载得到的文件名残缺（曾出现 "_2.6.4_x64_.exe"）
           $expected = @(
-            "发票酱_*_x64-setup.exe",
-            "发票酱_*_x64_绿色版.exe",
-            "发票酱_*_x64_OCR版-setup.exe",
-            "发票酱_*_x64_OCR绿色版.zip"
+            "TicketChan_${version}_x64-setup.exe",
+            "TicketChan_${version}_x64_portable.exe",
+            "TicketChan_${version}_x64_ocr-setup.exe",
+            "TicketChan_${version}_x64_ocr-portable.zip"
           )
+
           $files = Get-ChildItem -Path $dist -File
           if ($files.Count -ne 4) {
             Write-Host "❌ 期望 4 个产物，实际找到 $($files.Count) 个"
             $files | ForEach-Object { Write-Host "  - $($_.Name)" }
             exit 1
           }
+
+          $missing = @()
+          foreach ($name in $expected) {
+            if (-not (Test-Path (Join-Path $dist $name))) {
+              $missing += $name
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "❌ 缺少预期产物:"
+            $missing | ForEach-Object { Write-Host "  - $_" }
+            Write-Host "实际产物:"
+            $files | ForEach-Object { Write-Host "  - $($_.Name)" }
+            exit 1
+          }
+
           $files | ForEach-Object {
             $sizeMB = [math]::Round($_.Length / 1MB, 1)
             Write-Host "✅ $($_.Name) ($sizeMB MB)"
-          }
-
-      - name: Rename if Chinese lost (fallback)
-        shell: pwsh
-        run: |
-          # 兜底：如果 NSIS 安装包文件名丢失了中文，强制重命名
-          $dist = "dist"
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-
-          $renameMap = @{
-            # 模式: 不含中文的文件名 → 正确的中文名
-            "_${version}_x64-setup.exe"                = "发票酱_${version}_x64-setup.exe"
-            "_${version}_x64_OCR.-setup.exe"           = "发票酱_${version}_x64_OCR版-setup.exe"
-            "_${version}_x64_OCR-setup.exe"            = "发票酱_${version}_x64_OCR版-setup.exe"
-          }
-
-          foreach ($entry in $renameMap.GetEnumerator()) {
-            $oldPath = Join-Path $dist $entry.Key
-            $newPath = Join-Path $dist $entry.Value
-            if (Test-Path $oldPath) {
-              Move-Item -Force $oldPath $newPath
-              Write-Host "🔄 重命名: $($entry.Key) → $($entry.Value)"
-            }
-          }
-
-          # 检查绿色便携版文件名（轻量版=exe, OCR版=zip）
-          $zipRenameMap = @{
-            "_${version}_x64_.exe"                     = "发票酱_${version}_x64_绿色版.exe"
-            "_${version}_x64_OCR.zip"                  = "发票酱_${version}_x64_OCR绿色版.zip"
-          }
-
-          foreach ($entry in $zipRenameMap.GetEnumerator()) {
-            $oldPath = Join-Path $dist $entry.Key
-            $newPath = Join-Path $dist $entry.Value
-            if (Test-Path $oldPath) {
-              Move-Item -Force $oldPath $newPath
-              Write-Host "🔄 重命名: $($entry.Key) → $($entry.Value)"
-            }
           }
 
       - name: List final artifacts

@@ -29,6 +29,7 @@ npm run bump <版本号>    # 同步版本号
 
 - **编译缓存**: 只改 HTML/JS/CSS 不触发 Rust 重编译；改 Rust 文件才会完整重编译
 - **CI/CD**: GitHub Actions，push tag `v*` 触发，产出 4 个安装包（轻量/OCR × setup/绿色版）
+- **⚠️ 产物文件名必须全 ASCII**：GitHub Release 上传时会剥掉文件名里的非 ASCII 字符（中文 → 下划线），下载得到的文件名会残缺（曾出现 `_2.6.4_x64_.exe`）。`scripts/build-all.js` 的 `FINAL_FILES` 统一用 `TicketChan_<version>_x64[_ocr][-setup|_portable]` 命名，CI 的 `Verify artifacts` 会逐个断言这些名字；`productName`（`发票酱`）只作程序显示名，**不得**介入产物命名
 
 ## 架构总览
 

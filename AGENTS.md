@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-- **版本**: v2.6.4（数据源 `package.json`，`npm run bump` 同步到 Cargo.toml + tauri.conf.json）
+- **版本**: v2.6.5（数据源 `package.json`，`npm run bump` 同步到 Cargo.toml + tauri.conf.json）
 - **技术栈**: Tauri 2.x (Rust) + 原生 HTML/CSS/JS（无框架、无打包）
 - **双版本**: 轻量版 / OCR 版（PP-OCRv6）；Cargo.toml 定义 `ocr` feature，`lib.rs` 按 `#[cfg(feature = "ocr")]` 条件注册命令，OCR 构建用 `tauri.ocr.conf.json` 叠加配置（仅追加 bundle.resources）
 - **目录结构**:
@@ -228,6 +228,7 @@ Rust generate_pdf_from_layout() — lopdf 直通管道 → 失败回退 printpdf
 - **EXIF**：`image` crate 不自动应用；6=90°CW、8=90°CCW、3=180°
 - **批量文字提取**：多 PDF 必须按 pdfPath 分组调 `extract_pdf_texts`；返回 `HashMap<u32, PdfTextResult>` keyed by pageIdx，前端按 `r._pdfPageIdx` 取结果
 - **旋转方向**：全链路约定见「旋转与适配语义」小节——最易错点是 PDF 矩阵方向与 CSS 相反、pdf-lib 绕锚点旋转
+- **ureq 的 TLS 后端必须显式注入**（v2.6.4 线上事故，issue #37①）：`features = ["native-tls"]` 只是让 native-tls 适配器可用，**不会**成为默认 TLS 后端。未启用 `tls`(rustls) feature 时 `default_tls_config()` 返回一个直接报错的桩，于是**全部 https 请求**都以 `cannot make HTTPS request because no TLS backend is configured` 失败（更新检查、PDFium / SumatraPDF 下载同时报废）。所有 http 请求一律经 `build_http_agent()` 建 agent，不要裸建 `ureq::AgentBuilder`
 
 ## 硬性规则速查
 
@@ -240,9 +241,10 @@ Rust generate_pdf_from_layout() — lopdf 直通管道 → 失败回退 printpdf
 5. `defaultQuickLayouts()` 取深拷贝；空列表按 `Array.isArray` 恢复；不迁移旧默认布局
 6. 占位（`_placeholder`）只占槽位：打印/统计/汇总/重命名/OCR 全部排除
 7. 自动去重只删 `no:` key，`sum:` 仅标记
-8. 类型/格式筛选切换后必须 `clearInvisibleChecks()`
+8. 类型/格式筛选切换后必须重算勾选集合（`selectFilteredOnly()` / `applyFilterSelection()`）
 9. `deepEqual` 缓存比较排除纯打印机参数（printerName/copies/duplex/collate）
 10. 桌面/web 双分支：识别（ocr.js ↔ js/pdf-text.js）与预览布局（layout.js ↔ js/layout.js）改动双向同步
+11. 新增 http 请求一律走 `build_http_agent()`；裸建 `ureq::AgentBuilder` 会丢 TLS 后端（见「关键踩坑」）
 
 ## Git 工作流
 

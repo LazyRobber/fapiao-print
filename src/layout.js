@@ -363,6 +363,8 @@ var _slotTempDrag = null; // 尾部空槽拖拽的临时占位对象（未移动
 
 var _slotSuppressClick = false; // 槽位拖拽松手后吞掉浏览器合成的 click
 
+var DRAG_THRESHOLD_PX = 4; // 位移阈值：小于它不算拖拽，避免微小抖动吞掉 click
+
 /**
  * Bind mousedown on invoice-slot elements for drag-move and corner-resize.
  * Called after each renderPage(). Only binds once.
@@ -434,35 +436,36 @@ function onSlotMouseDown(e) {
   var fileIdx = S.currentPage * perPage + idx;
   var f = fileIdx < files.length ? files[fileIdx] : null;
 
-  var temp = null;
+  // 尾部第一个空槽按下即拖：占位延迟到确认拖拽后再落 —— 若在 mousedown 就插占位，
+  // 纯点击会在 mouseup 销毁占位并重建预览 DOM，浏览器随之不再派发 click（issue #37②）
+  var pendingTail = false;
   if (slotEl.querySelector('.slot-empty')) {
     if (f && f._loading) return;
     if (!f) {
-      // 尾部第一个空槽按下即拖：临时占位进入拖拽链路，其余空槽保持点击上传
       if (fileIdx !== files.length) return;
-      temp = insertTempPlaceholder();
-      f = temp;
-      files = getActiveFiles();
+      pendingTail = true;
     }
     // 空白占位（slot-blank）：与常规文件一样可拖拽排序，click 仍触发上传
   }
-  if (!f) return;
+  if (!f && !pendingTail) return;
 
   // Otherwise: click to select + drag to move
-  e.preventDefault();
-  if (!temp) selectSlot(idx);
+  // 尾部空槽的纯点击不进拖拽：不 preventDefault、不加 dragging，保证 click 正常派发
+  if (!pendingTail) e.preventDefault();
+  if (!pendingTail) selectSlot(idx);
 
   _slotDrag = {
     mode: 'move',
     slotEl: slotEl,
     wrapperEl: slotEl.querySelector(':scope > div'),
     fileObj: f,
-    tempPlaceholder: temp,
+    tempPlaceholder: null,
+    pendingTail: pendingTail,
     idx: idx,
     startX: e.clientX,
     startY: e.clientY,
-    startOffX: f.slotOffsetX || 0,
-    startOffY: f.slotOffsetY || 0,
+    startOffX: f ? (f.slotOffsetX || 0) : 0,
+    startOffY: f ? (f.slotOffsetY || 0) : 0,
     previewScale: getCurrentPreviewScale(),
     // Cache settings/layout for perf (avoid getSettings() every mousemove)
     cachedSettings: settings,
@@ -475,7 +478,7 @@ function onSlotMouseDown(e) {
     dropIdx: -1,
     dropZone: ''
   };
-  slotEl.classList.add('dragging');
+  if (!pendingTail) slotEl.classList.add('dragging');
 
   document.addEventListener('mousemove', onSlotMouseMove);
   document.addEventListener('mouseup', onSlotMouseUp);
@@ -520,7 +523,21 @@ function startResize(e, idx, slotEl, corner) {
 function onSlotMouseMove(e) {
   if (!_slotDrag) return;
   e.preventDefault();
+  // 位移不够不算拖拽：避免微小手抖把纯点击误判成拖拽，吞掉浏览器合成的 click
+  var totalDx = e.clientX - _slotDrag.startX;
+  var totalDy = e.clientY - _slotDrag.startY;
+  if (!_slotDrag.moved && Math.hypot(totalDx, totalDy) < DRAG_THRESHOLD_PX) return;
   _slotDrag.moved = true;  // Track actual mouse movement
+
+  // 尾部空槽：确认是拖拽后才落临时占位，进入排序链路
+  if (_slotDrag.pendingTail) {
+    _slotDrag.pendingTail = false;
+    var tailTemp = insertTempPlaceholder();
+    _slotDrag.tempPlaceholder = tailTemp;
+    _slotDrag.fileObj = tailTemp;
+    _slotDrag.activeLen = getActiveFiles().length;
+    _slotDrag.slotEl.classList.add('dragging');
+  }
 
   var settings = _slotDrag.cachedSettings;
   var layout = _slotDrag.cachedLayout;
